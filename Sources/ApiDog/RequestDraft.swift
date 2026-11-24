@@ -62,6 +62,14 @@ struct RequestAuthentication: Codable, Equatable {
         return value.isEmpty ? "apikey" : value
     }
 
+    var generatedQueryNames: [String] {
+        switch mode {
+        case .hmac: return location == .query ? [keyField, "timestamp", "sign"] : ["timestamp"]
+        case .apiKey: return location == .query && !name.isEmpty ? [name] : []
+        default: return []
+        }
+    }
+
     var generated: Bool { mode == .hmac || mode == .script }
 
 }
@@ -126,9 +134,16 @@ struct RequestDraft: Codable, Equatable {
         var inputs = [url] + (query + headers).flatMap { [$0.name, $0.value ?? ""] }
         if auth.mode != .none { inputs += [auth.name, auth.secret ?? "", auth.signingURI ?? ""] }
         if auth.mode == .script { inputs += (auth.scriptInputs ?? []).compactMap(\.value) }
+        if let route { inputs += [route.resolve, route.noProxy].compactMap { $0 } }
         if method.allowsBody, let body { inputs.append(body) }
         var seen = Set<String>()
         return inputs.flatMap { Self.matches(in: $0).map(\.name) }.filter { seen.insert($0).inserted }
+    }
+
+    func resolvedRoute() throws -> RequestRoute? {
+        guard let route else { return nil }
+        return try RequestRoute(resolve: route.resolve.map { try expand($0) },
+                                noProxy: route.noProxy.map { try expand($0) })
     }
 
     func prepareRequest() async throws -> URLRequest {
@@ -158,7 +173,7 @@ struct RequestDraft: Codable, Equatable {
         }
         components.fragment = nil
         guard let destination = components.url else { throw RequestError.invalidURL }
-        try route?.validate(for: destination)
+        try resolvedRoute()?.validate(for: destination)
         if let projection { _ = try ResponseProjection(projection) }
 
         var request = URLRequest(url: destination, timeoutInterval: 30)
@@ -321,7 +336,7 @@ struct RequestDraft: Codable, Equatable {
         }
     }
 
-    private func expand(_ text: String, encodeSegments: Bool = false) throws -> String {
+    func expand(_ text: String, encodeSegments: Bool = false) throws -> String {
         let expanded = NSMutableString(string: text)
         for match in Self.matches(in: text).reversed() {
             guard let value = variables[match.name], !value.isEmpty else { throw RequestError.missingVariable(match.name) }

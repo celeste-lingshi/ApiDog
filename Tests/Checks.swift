@@ -166,6 +166,11 @@ struct Checks {
         let queryRequest = try query.makeRequest()
         precondition(query.query.count == 1 && query.query[0].value == "a+b /")
         precondition(queryRequest.url?.absoluteString == "https://example.com?title=a%2Bb%20%2F")
+        precondition(queryRequest.httpBody == nil)
+        let form = try CurlCommand.parse("curl --data-urlencode 'vip=a+b' https://example.com").makeRequest()
+        precondition(form.httpMethod == "POST" && form.url?.absoluteString == "https://example.com")
+        precondition(form.httpBody == Data("vip=a%2Bb".utf8))
+        precondition(form.value(forHTTPHeaderField: "Content-Type") == "application/x-www-form-urlencoded")
         let head = try CurlCommand.parse("curl -I --user 'demo:' 'https://example.com'")
         let headRequest = try head.makeRequest()
         precondition(head.method == .head && headRequest.value(forHTTPHeaderField: "Authorization") == "Basic ZGVtbzo=")
@@ -206,14 +211,18 @@ struct Checks {
             jq -r '.reason[]?.port'
         """#
         var parsed = try CurlCommand.parse(source)
-        precondition(parsed.url == "http://demo.example.test:8009/api/v1/list")
+        precondition(parsed.url == "http://{{api_host}}:8009{{api_path}}")
+        precondition(parsed.variableNames == ["api_host", "api_path"])
+        precondition(parsed.variables == ["api_host": "demo.example.test", "api_path": "/api/v1/list"])
         precondition(parsed.method == .get && parsed.query.count == 1)
         precondition(parsed.query[0].name == "value" && parsed.query[0].value == "a+b")
         precondition(parsed.auth.mode == .hmac && parsed.auth.keyField == "key")
         precondition(parsed.auth.signingKeyInput == "LIST_API_KEY" && parsed.auth.signingSecretInput == "LIST_SECRET")
         precondition(parsed.auth.name.isEmpty && parsed.auth.secret == nil)
-        precondition(parsed.auth.signingURI == nil)
-        precondition(parsed.route == RequestRoute(resolve: "demo.example.test:8009:127.0.0.1", noProxy: "demo.example.test"))
+        precondition(parsed.auth.signingURI == "{{api_path}}")
+        precondition(parsed.route == RequestRoute(resolve: "{{api_host}}:8009:127.0.0.1", noProxy: "{{api_host}}"))
+        let route = try parsed.resolvedRoute()
+        precondition(route == RequestRoute(resolve: "demo.example.test:8009:127.0.0.1", noProxy: "demo.example.test"))
         precondition(parsed.projection == ".reason[]?.port")
         let format = try ResponseProjection(parsed.projection!)
         let ports = try format.format(#"{"reason":[{"port":80},{"port":"443"}]}"#)
@@ -228,14 +237,25 @@ struct Checks {
         precondition(query.contains(URLQueryItem(name: "key", value: "demo-key")))
         precondition(query.contains(URLQueryItem(name: "timestamp", value: "1700000000")))
         precondition(query.filter { $0.name == "sign" && $0.value?.count == 43 }.count == 1)
-        let exported = CurlCommand.render(request, followsRedirects: false, route: parsed.route, projection: parsed.projection)
+        let exported = CurlCommand.render(request, followsRedirects: false, route: route, projection: parsed.projection)
         precondition(exported.contains("--resolve 'demo.example.test:8009:127.0.0.1'"))
         precondition(exported.contains("--noproxy 'demo.example.test'"))
         precondition(exported.hasSuffix("jq -r '.reason[]?.port'"))
         let roundTrip = try CurlCommand.parse(exported)
         let replayed = try roundTrip.makeRequest()
-        precondition(replayed.url == request.url && roundTrip.route == parsed.route)
+        precondition(replayed.url == request.url && roundTrip.route == route)
         precondition(roundTrip.projection == parsed.projection)
+
+        parsed.variables["api_host"] = "updated.example.test"
+        parsed.variables["api_path"] = "/api/v2/list"
+        let updated = try parsed.makeRequest(at: fixed)
+        let updatedRoute = try parsed.resolvedRoute()
+        precondition(updated.url?.host == "updated.example.test" && updated.url?.path == "/api/v2/list")
+        precondition(updatedRoute == RequestRoute(resolve: "updated.example.test:8009:127.0.0.1", noProxy: "updated.example.test"))
+        let updatedQuery = URLComponents(url: updated.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let signature = AuthCrypto.hmacBase64URL("demo-secret", "demo-key_demo-secret_/api/v2/list_1700000000")
+        precondition(updatedQuery.contains(URLQueryItem(name: "sign", value: signature)))
+        precondition(parsed.auth.generatedQueryNames == ["key", "timestamp", "sign"])
 
         for invalid in [
             source.replacingOccurrences(of: "date +%s", with: "date +%N"),

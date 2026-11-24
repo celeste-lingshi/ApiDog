@@ -3,9 +3,15 @@ import SwiftUI
 struct RequestFieldsEditor: View {
     @Binding var fields: [RequestField]
     var header: Bool
+    var generated: [String] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !header {
+                Text("这些参数会追加到 URL 的 ? 后面。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Console.muted)
+            }
             HStack {
                 Text("名称").frame(width: 116, alignment: .leading)
                 Text("值")
@@ -20,8 +26,14 @@ struct RequestFieldsEditor: View {
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(Console.muted)
 
+            if !generated.isEmpty {
+                Text("认证自动添加  \(generated.joined(separator: "、"))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Console.muted)
+            }
+
             if fields.isEmpty {
-                Text(header ? "通过「＋ 请求头」添加 Content-Type 等字段。" : "查询参数会自动追加到 URL。")
+                Text(header ? "通过「＋ 请求头」添加 Content-Type 等字段。" : "可用「＋ 参数」添加一行。")
                     .font(.system(size: 12))
                     .foregroundStyle(Console.muted)
             } else {

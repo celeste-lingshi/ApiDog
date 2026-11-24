@@ -42,10 +42,16 @@ enum CurlCommand {
         return try parseCommand(source)
     }
 
-    static func parseCommand(_ text: String, substitutions: [String: String]? = nil) throws -> RequestDraft {
+    static func parseCommand(_ text: String, substitutions: [String: String]? = nil,
+                             templateVariables: [String: String] = [:]) throws -> RequestDraft {
         let (arguments, pipeline) = try tokenize(text, substitutions: substitutions, allowingPipe: true)
         guard arguments.first == "curl" else { throw CurlError.missingCommand }
-        var draft = RequestDraft()
+        var templates = arguments
+        if var substitutions, !templateVariables.isEmpty {
+            for name in templateVariables.keys { substitutions[name] = "{{\(name)}}" }
+            (templates, _) = try tokenize(text, substitutions: substitutions, allowingPipe: true)
+        }
+        var draft = RequestDraft(variables: templateVariables)
         if let pipeline {
             guard pipeline.count == 3, pipeline[0] == "jq",
                   ["-r", "--raw-output"].contains(pipeline[1]) else { throw CurlError.unsupportedPipeline }
@@ -54,7 +60,7 @@ enum CurlCommand {
         }
         var route = RequestRoute()
         var method: HTTPMethod?
-        var url: String?
+        var url: (literal: String, template: String)?
         var data: [String] = []
         var auth: RequestAuthentication?
         var get = false
@@ -62,7 +68,7 @@ enum CurlCommand {
         var json = false
         var endOptions = false
 
-        func setURL(_ value: String) throws {
+        func setURL(_ value: (literal: String, template: String)) throws {
             guard url == nil else { throw CurlError.multipleURLs }
             url = value
         }
@@ -70,9 +76,10 @@ enum CurlCommand {
         var index = 1
         while index < arguments.count {
             let argument = arguments[index]
+            let template = templates[index]
             index += 1
             if endOptions || !argument.hasPrefix("-") {
-                try setURL(argument)
+                try setURL((argument, template))
                 continue
             }
             if argument == "--" {
@@ -85,21 +92,23 @@ enum CurlCommand {
             let option = attachedShort ? String(argument.prefix(2)) : String(split[0])
             var attached = attachedShort ? String(argument.dropFirst(2)) : (split.count == 2 ? String(split[1]) : nil)
 
-            func value() throws -> String {
+            func pair() throws -> (literal: String, template: String) {
                 if let inline = attached {
                     attached = nil
-                    return inline
+                    let parsed = attachedShort ? String(template.dropFirst(2))
+                        : template.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).last.map(String.init)
+                    return (inline, parsed ?? inline)
                 }
-                guard index < arguments.count else {
-                    throw CurlError.missingValue(option)
-                }
+                guard index < arguments.count else { throw CurlError.missingValue(option) }
                 defer { index += 1 }
-                return arguments[index]
+                return (arguments[index], templates[index])
             }
+
+            func value() throws -> String { try pair().literal }
 
             switch option {
             case "--url":
-                try setURL(value())
+                try setURL(pair())
             case "-X", "--request":
                 let name = try value().uppercased()
                 guard let httpMethod = HTTPMethod(rawValue: name) else { throw CurlError.unsupportedMethod(name) }
@@ -151,8 +160,8 @@ enum CurlCommand {
             case "-L", "--location": draft.followsRedirects = true
             case "--resolve":
                 guard route.resolve == nil else { throw RouteError.invalidResolve }
-                route.resolve = try value()
-            case "--noproxy": route.noProxy = try value()
+                route.resolve = try pair().template
+            case "--noproxy": route.noProxy = try pair().template
             case "-g", "--globoff", "--compressed", "--basic", "-s", "-S", "-sS", "-fsS", "-f", "--fail", "--silent", "--show-error":
                 break
             default:
@@ -161,7 +170,7 @@ enum CurlCommand {
             if attached != nil { throw CurlError.unsupported(argument) }
         }
 
-        guard let url, let components = URLComponents(string: url),
+        guard let url, let components = URLComponents(string: url.literal),
               let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
               let host = components.host, !host.isEmpty,
               components.user == nil, components.password == nil else {
@@ -171,8 +180,14 @@ enum CurlCommand {
         draft.method = method ?? (head ? .head : (get || data.isEmpty ? .get : .post))
         if head && draft.method != .head { throw CurlError.unsupportedBody }
 
-        let address = url.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
-        draft.url = String(address.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)[0])
+        func addressWithoutQuery(_ address: String) -> String {
+            String(address.prefix { $0 != "#" && $0 != "?" })
+        }
+        let literalAddress = addressWithoutQuery(url.literal)
+        let templateAddress = addressWithoutQuery(url.template)
+        // 变量若包含查询或片段，沿用已拆分的地址，避免把参数重复拼进去。
+        draft.url = (try? draft.expand(templateAddress, encodeSegments: true)) == literalAddress
+            ? templateAddress : literalAddress
         draft.query = (components.queryItems ?? []).map { RequestField($0.name, $0.value) }
         if get, !data.isEmpty {
             let suffix = data.joined(separator: "&")

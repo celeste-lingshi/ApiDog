@@ -514,7 +514,7 @@ struct WorkspaceView: View {
             case .variables:
                 RequestVariablesEditor(names: draft.variableNames, values: $draft.variables)
             case .query:
-                RequestFieldsEditor(fields: $draft.query, header: false)
+                RequestFieldsEditor(fields: $draft.query, header: false, generated: draft.auth.generatedQueryNames)
             case .headers:
                 RequestFieldsEditor(fields: $draft.headers, header: true)
             case .authentication:
@@ -528,7 +528,9 @@ struct WorkspaceView: View {
                         set: { draft.body = $0.isEmpty ? nil : $0 }
                     ), label: "请求体", placeholder: #"{"name":"ApiDog"}"#)
                 } else {
-                    Text("\(draft.method.rawValue) 请求不会发送请求体。")
+                    Text(draft.method == .get
+                         ? "GET 的参数填在「查询」，例如 cURL 的 --get --data-urlencode。"
+                         : "\(draft.method.rawValue) 请求没有正文。")
                         .font(.callout)
                         .foregroundStyle(Console.muted)
                         .padding(12)
@@ -559,7 +561,7 @@ struct WorkspaceView: View {
                         }
                     )).requestInput()
                 }
-                Text("响应提取使用简单字段路径。原始内容仍在「正文」。")
+                Text("指定解析和代理决定请求怎么连接。响应提取只影响返回结果的显示。")
                     .font(.system(size: 11))
                     .foregroundStyle(Console.muted)
             }
@@ -695,7 +697,7 @@ struct WorkspaceView: View {
             prepared = generatedPreview?.draft == draft ? generatedPreview?.command : nil
         } else {
             prepared = Result {
-                formattedCommand(try draft.makeRequest(), for: draft)
+                try formattedCommand(draft.makeRequest(), for: draft)
             }
         }
         let command = try? prepared?.get()
@@ -889,15 +891,15 @@ struct WorkspaceView: View {
         return NSPasteboard.general.setString(text, forType: .string)
     }
 
-    private func formattedCommand(_ request: URLRequest, for snapshot: RequestDraft) -> String {
+    private func formattedCommand(_ request: URLRequest, for snapshot: RequestDraft) throws -> String {
         CurlCommand.render(request, followsRedirects: snapshot.followsRedirects,
-                           route: snapshot.route, projection: snapshot.projection)
+                           route: try snapshot.resolvedRoute(), projection: snapshot.projection)
     }
 
     private func preview(_ snapshot: RequestDraft) async -> Result<String, Error> {
         do {
             let request = try await snapshot.prepareRequest()
-            return .success(formattedCommand(request, for: snapshot))
+            return .success(try formattedCommand(request, for: snapshot))
         } catch {
             return .failure(error)
         }
@@ -942,10 +944,10 @@ struct WorkspaceView: View {
                 try Task.checkCancellation()
                 if template.auth.generated {
                     generatedPreview = AuthPreview(draft: template, command: .success(
-                        formattedCommand(request, for: template)
+                        try formattedCommand(request, for: template)
                     ))
                 }
-                let response = try await HTTPClient.send(request, followsRedirects: template.followsRedirects, route: template.route)
+                let response = try await HTTPClient.send(request, followsRedirects: template.followsRedirects, route: try template.resolvedRoute())
                 try Task.checkCancellation()
                 result = response
             } catch {

@@ -63,6 +63,7 @@ enum SignedCurlRecipe {
         guard hasTime, let signedURI = literals[pathName], !signedURI.isEmpty else { throw RecipeError.unsupported }
         let key = literals.removeValue(forKey: keyName)
         let secret = literals.removeValue(forKey: secretName)
+        let templateVariables = literals
         let marker = UUID().uuidString
         let keyMarker = marker + "-key"
         let timeMarker = marker + "-time"
@@ -71,7 +72,8 @@ enum SignedCurlRecipe {
         literals[timeName] = timeMarker
         literals[signName] = signMarker
 
-        var draft = try CurlCommand.parseCommand(String(text[start.lowerBound...]), substitutions: literals)
+        var draft = try CurlCommand.parseCommand(String(text[start.lowerBound...]), substitutions: literals,
+                                                templateVariables: templateVariables)
         guard draft.auth.mode == .none,
               let keyField = draft.query.first(where: { $0.value == keyMarker })?.name,
               !keyField.isEmpty, !["timestamp", "sign"].contains(keyField),
@@ -85,12 +87,13 @@ enum SignedCurlRecipe {
             + (draft.query + draft.headers).flatMap { [$0.name, $0.value ?? ""] }
         guard !leftovers.contains(where: { $0.contains(marker) }) else { throw RecipeError.authFields }
 
-        let path = URLComponents(string: draft.url)?.percentEncodedPath
         draft.auth = RequestAuthentication(
             mode: .hmac, name: key ?? "", secret: secret,
-            signingURI: path == signedURI ? nil : signedURI,
+            signingURI: "{{\(pathName)}}",
             signingKeyField: keyField, signingKeyInput: keyName, signingSecretInput: secretName
         )
+        let referenced = Set(draft.variableNames)
+        draft.variables = templateVariables.filter { referenced.contains($0.key) }
         return draft
     }
 }
