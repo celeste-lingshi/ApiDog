@@ -1,13 +1,13 @@
 import SwiftUI
 
 enum WorkspaceDropdown: Hashable {
-    case method, authentication, authLocation, history
+    case method, authentication, authLocation, history, directory
 
     var width: CGFloat {
         switch self {
         case .method: return 144
         case .authentication, .authLocation: return 188
-        case .history: return 156
+        case .history, .directory: return 166
         }
     }
 }
@@ -29,7 +29,7 @@ struct DropdownOption {
     var tone: Color = Console.text
     var monospaced = false
     var selected = false
-    var choose: () -> Void
+    var choose: (() -> Void)?
 }
 
 struct ConsoleDropdown: View {
@@ -78,45 +78,24 @@ struct ConsoleDropdown: View {
     private func row(_ index: Int) -> some View {
         let option = options[index]
         let highlighted = hovered == index || focused == index
-        return Button {
-            dismiss()
-            option.choose()
-        } label: {
-            HStack(spacing: 8) {
-                if option.monospaced {
-                    Circle().fill(option.tone).frame(width: 6, height: 6)
-                        .accessibilityHidden(true)
+        return Group {
+            if let choose = option.choose {
+                Button {
+                    dismiss()
+                    choose()
+                } label: {
+                    rowLabel(option, highlighted: highlighted)
                 }
-                if let icon = option.icon {
-                    Image(systemName: icon).frame(width: 14)
-                        .accessibilityHidden(true)
-                }
-                Text(option.title)
-                    .font(.system(size: 12, weight: .semibold, design: option.monospaced ? .monospaced : .default))
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                if option.selected {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Console.accent)
-                        .accessibilityHidden(true)
-                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(focused == index ? .defaultAction : nil)
+            } else {
+                rowLabel(option, highlighted: false)
             }
-            .foregroundStyle(option.tone)
-            .padding(.horizontal, 8)
-            .frame(height: Self.rowHeight)
-            .consoleSurface(
-                option.selected ? Console.selected : (highlighted ? Console.line : .clear),
-                border: highlighted ? Console.muted.opacity(0.40) : .clear,
-                radius: 5
-            )
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
         .focusable()
         .focused($focused, equals: index)
-        .keyboardShortcut(focused == index ? .defaultAction : nil)
         .onHover { hovering in
+            guard option.choose != nil else { return }
             if hovering {
                 hovered = index
             } else if hovered == index {
@@ -124,5 +103,37 @@ struct ConsoleDropdown: View {
             }
         }
         .accessibilityAddTraits(option.selected ? .isSelected : [])
+    }
+
+    private func rowLabel(_ option: DropdownOption, highlighted: Bool) -> some View {
+        HStack(spacing: 8) {
+            if option.monospaced {
+                Circle().fill(option.tone).frame(width: 6, height: 6)
+                    .accessibilityHidden(true)
+            }
+            if let icon = option.icon {
+                Image(systemName: icon).frame(width: 14)
+                    .accessibilityHidden(true)
+            }
+            Text(option.title)
+                .font(.system(size: 12, weight: .semibold, design: option.monospaced ? .monospaced : .default))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            if option.selected {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Console.accent)
+                    .accessibilityHidden(true)
+            }
+        }
+        .foregroundStyle(option.tone)
+        .padding(.horizontal, 8)
+        .frame(height: Self.rowHeight)
+        .consoleSurface(
+            option.selected ? Console.selected : (highlighted ? Console.line : .clear),
+            border: highlighted ? Console.muted.opacity(0.40) : .clear,
+            radius: 5
+        )
+        .contentShape(Rectangle())
     }
 }

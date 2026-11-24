@@ -17,6 +17,9 @@ struct WorkspaceView: View {
     @State private var requestCancelled = false
     @State private var copiedTab: ResponseTab?
     @State private var historyQuery = ""
+    @State private var sidebarTab = SidebarTab.directory
+    @State private var activeSavedID: UUID?
+    @State private var collapsedCategories: Set<UUID> = []
     @State private var modal: Modal?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropdown: WorkspaceDropdown?
@@ -27,7 +30,13 @@ struct WorkspaceView: View {
         var command: Result<String, Error>
     }
 
-    private enum Modal: Equatable { case importCurl, clearHistory }
+    private enum Modal: Equatable { case importCurl, clearHistory, newCategory, newRequest, saveRequest, removeRequest }
+    private enum SidebarTab: String, CaseIterable { case directory = "请求目录", history = "请求历史" }
+
+    private var directory: RequestDirectory { model.workspace.requestDirectory }
+    private var activeSavedRequest: SavedRequest? {
+        directory.requests.first { $0.id == activeSavedID }
+    }
     private enum RequestTab: String, CaseIterable {
         case variables = "变量", query = "查询", headers = "请求头", authentication = "认证"
         case body = "请求体", connection = "连接"
@@ -70,7 +79,7 @@ struct WorkspaceView: View {
             GeometryReader { geometry in
                 if let dropdown, let anchor = anchors[dropdown] {
                     let trigger = geometry[anchor]
-                    let left = dropdown == .history ? trigger.maxX - dropdown.width : trigger.minX
+                    let left = [.history, .directory].contains(dropdown) ? trigger.maxX - dropdown.width : trigger.minX
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture { self.dropdown = nil }
@@ -83,7 +92,6 @@ struct WorkspaceView: View {
                 }
             }
         }
-        .onAppear { urlFocused = true }
         .task(id: draft) {
             let snapshot = draft
             generatedPreview = nil
@@ -101,17 +109,40 @@ struct WorkspaceView: View {
                     switch modal {
                     case .importCurl:
                         CurlImportDialog(cancel: closeModal) { imported in
+                            activeSavedID = nil
                             draft = imported
                             resetResponse()
                             requestTab = startingTab(for: imported)
                             self.modal = nil
                         }
                     case .clearHistory:
-                        ClearHistoryDialog(cancel: closeModal) {
+                        ConsoleConfirmationDialog(title: "清空全部请求历史？",
+                                                  message: "历史请求将被删除，请求目录里的项目会保留。",
+                                                  confirmTitle: "清空历史", cancel: closeModal) {
                             model.workspace.history.removeAll()
                             model.save()
-                            resetResponse()
+                            if result == nil { activeHistory = nil }
                             closeModal()
+                        }
+                    case .newCategory:
+                        RequestMetadataDialog(title: "新建分类", existingCategoryNames: directory.categories.map(\.name),
+                                              cancel: closeModal) { name, _ in
+                            model.workspace.requestDirectory.categories.append(RequestCategory(name: name))
+                            model.save()
+                            closeModal()
+                        }
+                    case .newRequest, .saveRequest:
+                        requestMetadataDialog(creating: modal == .newRequest)
+                    case .removeRequest:
+                        if let request = activeSavedRequest {
+                            ConsoleConfirmationDialog(title: "删除「\(request.name)」？",
+                                               message: "这条请求将从目录移除，发送历史会保留。",
+                                               confirmTitle: "删除请求", cancel: closeModal) {
+                                model.workspace.requestDirectory.requests.removeAll { $0.id == request.id }
+                                activeSavedID = nil
+                                model.save()
+                                closeModal()
+                            }
                         }
                     }
                 }
@@ -151,49 +182,82 @@ struct WorkspaceView: View {
 
     private func closeModal() {
         modal = nil
-        urlFocused = true
+    }
+
+    private func requestMetadataDialog(creating: Bool) -> some View {
+        let existing = creating ? nil : activeSavedRequest
+        let suggested = URLComponents(string: draft.url)?.path.split(separator: "/").last.map(String.init) ?? ""
+        return RequestMetadataDialog(title: creating ? "新建请求" : "保存请求",
+                                     name: creating ? "" : (existing?.name ?? suggested),
+                                     categories: directory.categories, categoryID: existing?.categoryID,
+                                     cancel: closeModal) { name, categoryID in
+            let request = SavedRequest(id: existing?.id ?? UUID(), name: name, categoryID: categoryID,
+                                       draft: creating ? RequestDraft() : draft)
+            model.workspace.requestDirectory.store(request)
+            model.save()
+            if let categoryID { collapsedCategories.remove(categoryID) }
+            sidebarTab = .directory
+            if creating {
+                openSavedRequest(request)
+            } else {
+                activeSavedID = request.id
+            }
+            closeModal()
+        }
+    }
+
+    private func openSavedRequest(_ request: SavedRequest) {
+        urlFocused = false
+        activeSavedID = request.id
+        draft = request.draft
+        requestTab = startingTab(for: draft)
+        resetResponse()
     }
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button {
-                dropdown = nil
-                draft = RequestDraft()
-                requestTab = .variables
-                resetResponse()
-                urlFocused = true
-            } label: {
-                HStack {
-                    Label("新建请求", systemImage: "plus")
-                    Spacer()
-                    Text("⌘N").foregroundStyle(Console.muted).accessibilityHidden(true)
+            HStack(spacing: 6) {
+                ConsoleTabs(tabs: SidebarTab.allCases, selection: $sidebarTab) { $0.rawValue }
+                Spacer(minLength: 0)
+                if sidebarTab == .directory {
+                    sidebarAction(.directory, label: "添加到请求目录", symbol: "plus")
+                        .disabled(isSending)
+                } else {
+                    sidebarAction(.history, label: "历史操作", symbol: "ellipsis")
                 }
             }
-            .buttonStyle(ConsoleButton())
-            .keyboardShortcut("n", modifiers: .command)
-            .disabled(isSending)
             .padding(.horizontal, 14)
-            .padding(.top, 16)
+            .padding(.top, 9)
+            .padding(.bottom, 4)
 
-            HStack {
-                Text("请求历史")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Console.muted)
-                Spacer()
-                dropdownTrigger(.history, label: "历史操作") {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Console.muted)
-                        .frame(width: 26, height: 24)
-                        .consoleSurface(dropdown == .history ? Console.line : .clear,
-                                        border: Console.line, radius: 6)
-                }
-                .disabled(model.workspace.history.isEmpty || isSending)
+            ConsoleRule()
+                .padding(.bottom, 8)
+            if sidebarTab == .directory {
+                RequestDirectoryView(directory: directory, selectedID: activeSavedID, collapsed: $collapsedCategories,
+                                     select: openSavedRequest)
+                    .disabled(isSending)
+            } else {
+                historyContents
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 19)
-            .padding(.bottom, 6)
+            Spacer(minLength: 0)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Console.sidebar)
+    }
 
+    private func sidebarAction(_ id: WorkspaceDropdown, label: String, symbol: String) -> some View {
+        dropdownTrigger(id, label: label) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Console.muted)
+                .frame(width: 32, height: 29)
+                .consoleSurface(dropdown == id ? Console.line : Console.input, border: Console.line, radius: 6)
+        }
+        .help(label)
+    }
+
+    private var historyContents: some View {
+        VStack(alignment: .leading, spacing: 0) {
             historySearch
                 .padding(.horizontal, 14)
                 .padding(.bottom, 9)
@@ -210,6 +274,8 @@ struct WorkspaceView: View {
                     LazyVStack(spacing: 4) {
                         ForEach(entries) { entry in
                             HistoryRow(entry: entry, selected: entry.id == activeHistory?.id) {
+                                urlFocused = false
+                                activeSavedID = nil
                                 resetResponse()
                                 activeHistory = entry
                                 draft = model.workspace.draft(for: entry)
@@ -224,10 +290,7 @@ struct WorkspaceView: View {
                     .padding(.bottom, 10)
                 }
             }
-            Spacer(minLength: 0)
         }
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(Console.sidebar)
     }
 
     private var historySearch: some View {
@@ -256,6 +319,27 @@ struct WorkspaceView: View {
 
     private var mainPane: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if let saved = activeSavedRequest {
+                HStack(spacing: 7) {
+                    if let category = directory.categories.first(where: { $0.id == saved.categoryID }) {
+                        Label(category.name, systemImage: "folder")
+                            .foregroundStyle(Console.muted)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Console.muted)
+                            .accessibilityHidden(true)
+                    }
+                    Text(saved.name).fontWeight(.semibold)
+                    if draft != saved.draft {
+                        Text("有修改")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Console.amber)
+                    }
+                }
+                .font(.system(size: 13))
+                .lineLimit(1)
+            }
+
             addressBar
 
             GeometryReader { geometry in
@@ -285,7 +369,7 @@ struct WorkspaceView: View {
             urlFocused = false
             dropdown = dropdown == id ? nil : id
         } label: {
-            content()
+            content().contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .anchorPreference(key: DropdownAnchors.self, value: .bounds) { [id: $0] }
@@ -317,9 +401,26 @@ struct WorkspaceView: View {
                 }
             }
         case .history:
+            if model.workspace.history.isEmpty {
+                return [DropdownOption(title: "暂无请求历史", icon: "clock", tone: Console.muted)]
+            }
+            if isSending {
+                return [DropdownOption(title: "发送中，稍后清空", icon: "clock", tone: Console.muted)]
+            }
             return [DropdownOption(title: "清空历史", icon: "trash", tone: Console.red) {
                 openModal(.clearHistory)
             }]
+        case .directory:
+            var options = [
+                DropdownOption(title: "新建分类", icon: "folder.badge.plus") { openModal(.newCategory) },
+                DropdownOption(title: "新建请求", icon: "doc.badge.plus") { openModal(.newRequest) }
+            ]
+            if activeSavedRequest != nil {
+                options.append(DropdownOption(title: "删除当前请求", icon: "trash", tone: Console.red) {
+                    openModal(.removeRequest)
+                })
+            }
+            return options
         }
     }
 
@@ -361,6 +462,15 @@ struct WorkspaceView: View {
             }
             .disabled(isSending)
             .onSubmit { if hasAddress && !isSending { sendOrCancel() } }
+
+            Button {
+                openModal(.saveRequest)
+            } label: {
+                Label("保存", systemImage: "tray.and.arrow.down")
+            }
+            .buttonStyle(ConsoleButton())
+            .keyboardShortcut("s", modifiers: .command)
+            .disabled(isSending || (!hasAddress && activeSavedID == nil))
 
             Button(action: sendOrCancel) {
                 HStack(spacing: 7) {

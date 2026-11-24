@@ -6,12 +6,13 @@ struct Checks {
         if AuthScript.runWorkerIfRequested() { return }
         try checkRequest()
         try checkWorkspace()
+        try checkRequestDirectory()
         try checkCurl()
         try checkSignedCurlRecipe()
         try checkGeneratedAuthentication()
         try await checkResponse()
         try await checkCancellation()
-        print("通过：请求内变量和认证、旧历史读取、凭证落盘、签名、脚本认证、cURL 导入导出、签名命令导入与响应提取、响应处理、请求取消")
+        print("通过：请求内变量和认证、旧历史读取、分类与请求保存、凭证落盘、签名、脚本认证、cURL 导入导出、签名命令导入与响应提取、响应处理、请求取消")
     }
 
     static func checkRequest() throws {
@@ -97,6 +98,47 @@ struct Checks {
         precondition(reloaded.matchingHistory("get").count == 100)
         precondition(reloaded.matchingHistory("404").isEmpty)
         precondition(!contents.contains("sample-credential"))
+    }
+
+    static func checkRequestDirectory() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let storage = WorkspaceStorage(file: folder.appendingPathComponent("workspace.json"))
+        var workspace = try storage.load()
+        let category = RequestCategory(name: "测试分组")
+        workspace.requestDirectory.categories.append(category)
+        let draft = RequestDraft(
+            url: "https://example.com/{host}/ping",
+            variables: ["host": "example", "token": "directory-private-key"],
+            auth: RequestAuthentication(mode: .bearer, secret: "{token}")
+        )
+        var saved = SavedRequest(name: "查询接口", categoryID: category.id, draft: draft)
+        workspace.requestDirectory.store(saved)
+        precondition(workspace.requestDirectory.requests(in: category.id) == [saved])
+        workspace.append(HistoryEntry(date: .now, request: draft, status: 200, milliseconds: 10))
+        saved.categoryID = nil
+        saved.name = "重新命名"
+        workspace.requestDirectory.store(saved)
+        precondition(workspace.requestDirectory.requests(in: category.id).isEmpty)
+        precondition(workspace.requestDirectory.requests(in: nil) == [saved])
+        precondition(workspace.history.count == 1)
+
+        try storage.save(workspace)
+        let restored = try storage.load()
+        let contents = try String(contentsOf: storage.file, encoding: .utf8)
+        precondition(restored.requestDirectory.categories == [category])
+        precondition(restored.requestDirectory.requests.count == 1)
+        precondition(restored.requestDirectory.requests[0].id == saved.id)
+        precondition(restored.requestDirectory.requests[0].name == "重新命名")
+        precondition(restored.requestDirectory.requests[0].draft.auth.secret == nil)
+        precondition(restored.requestDirectory.requests[0].draft.variables == ["host": "example"])
+        precondition(!contents.contains("directory-private-key"))
+
+        workspace.history.removeAll()
+        precondition(workspace.requestDirectory.requests == [saved])
+        workspace.append(HistoryEntry(date: .now, request: draft, status: 200, milliseconds: 11))
+        workspace.requestDirectory.requests.removeAll { $0.id == saved.id }
+        precondition(workspace.history.count == 1 && workspace.requestDirectory.requests.isEmpty)
     }
 
     static func checkCurl() throws {

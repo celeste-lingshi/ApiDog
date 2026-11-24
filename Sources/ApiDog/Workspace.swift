@@ -30,10 +30,45 @@ struct HistoryEntry: Identifiable, Codable, Equatable {
     var milliseconds: Int
 }
 
+struct RequestCategory: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+}
+
+struct SavedRequest: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var categoryID: UUID?
+    var draft: RequestDraft
+}
+
+struct RequestDirectory: Codable, Equatable {
+    var categories: [RequestCategory] = []
+    var requests: [SavedRequest] = []
+
+    func requests(in categoryID: UUID?) -> [SavedRequest] {
+        requests.filter { $0.categoryID == categoryID }
+    }
+
+    mutating func store(_ request: SavedRequest) {
+        if let index = requests.firstIndex(where: { $0.id == request.id }) {
+            requests[index] = request
+        } else {
+            requests.append(request)
+        }
+    }
+}
+
 struct Workspace: Codable, Equatable {
     var environments: [RequestEnvironment] = []
     var selectedEnvironmentID: UUID?
     var history: [HistoryEntry] = []
+    var directory: RequestDirectory?
+
+    var requestDirectory: RequestDirectory {
+        get { directory ?? RequestDirectory() }
+        set { directory = newValue }
+    }
 
     func draft(for entry: HistoryEntry) -> RequestDraft {
         var draft = entry.request
@@ -85,6 +120,12 @@ struct WorkspaceStorage {
         }
         for entry in persisted.history.indices {
             persisted.history[entry].request = persisted.history[entry].request.withoutStoredAuthentication()
+        }
+        if var directory = persisted.directory {
+            for index in directory.requests.indices {
+                directory.requests[index].draft = directory.requests[index].draft.withoutStoredAuthentication()
+            }
+            persisted.directory = directory
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

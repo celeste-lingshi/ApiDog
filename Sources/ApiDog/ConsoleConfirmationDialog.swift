@@ -1,6 +1,9 @@
 import SwiftUI
 
-struct ClearHistoryDialog: View {
+struct ConsoleConfirmationDialog: View {
+    let title: String
+    let message: String
+    let confirmTitle: String
     let cancel: () -> Void
     let confirm: () -> Void
     @FocusState private var cancelFocused: Bool
@@ -15,10 +18,10 @@ struct ClearHistoryDialog: View {
                     .consoleSurface(Console.red.opacity(0.10), border: Console.red.opacity(0.28), radius: 8)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("清空全部请求历史？")
+                    Text(title)
                         .font(.system(size: 17, weight: .semibold))
                         .accessibilityAddTraits(.isHeader)
-                    Text("历史请求将被删除，已保存的环境变量会保留。")
+                    Text(message)
                         .font(.system(size: 13))
                         .foregroundStyle(Console.muted)
                         .lineSpacing(2)
@@ -39,7 +42,7 @@ struct ClearHistoryDialog: View {
                             .allowsHitTesting(false)
                     }
                     .keyboardShortcut(.defaultAction)
-                Button("清空历史", action: confirm)
+                Button(confirmTitle, action: confirm)
                     .buttonStyle(ConsoleButton(prominent: true, destructive: true))
             }
         }
