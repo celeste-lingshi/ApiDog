@@ -40,6 +40,10 @@ struct SavedRequest: Identifiable, Codable, Equatable {
     var name: String
     var categoryID: UUID?
     var draft: RequestDraft
+
+    func duplicate(name: String, categoryID: UUID?) -> Self {
+        SavedRequest(name: name, categoryID: categoryID, draft: draft)
+    }
 }
 
 struct RequestDirectory: Codable, Equatable {

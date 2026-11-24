@@ -139,6 +139,29 @@ struct Checks {
         workspace.append(HistoryEntry(date: .now, request: draft, status: 200, milliseconds: 11))
         workspace.requestDirectory.requests.removeAll { $0.id == saved.id }
         precondition(workspace.history.count == 1 && workspace.requestDirectory.requests.isEmpty)
+
+        saved.draft.method = .post
+        saved.draft.headers = [RequestField("X-Copy-Test", "enabled")]
+        saved.draft.query = [RequestField("limit", "1")]
+        saved.draft.body = #"{"test":true}"#
+        saved.draft.route = RequestRoute(resolve: "example.com:443:127.0.0.1", noProxy: "example.com")
+        saved.draft.projection = ".items[]"
+        let copy = saved.duplicate(name: "跨目录副本", categoryID: category.id)
+        workspace.requestDirectory.store(saved)
+        workspace.requestDirectory.store(copy)
+        precondition(copy.id != saved.id && copy.name == "跨目录副本" && copy.draft == saved.draft)
+        precondition(workspace.requestDirectory.requests(in: nil) == [saved])
+        precondition(workspace.requestDirectory.requests(in: category.id) == [copy])
+        var editedCopy = copy
+        editedCopy.draft.variables["host"] = "copied"
+        workspace.requestDirectory.store(editedCopy)
+        precondition(workspace.requestDirectory.requests(in: nil) == [saved])
+
+        try storage.save(workspace)
+        let savedCopies = try storage.load().requestDirectory.requests(in: category.id)
+        var expected = editedCopy
+        expected.draft = editedCopy.draft.withoutStoredAuthentication()
+        precondition(savedCopies == [expected])
     }
 
     static func checkCurl() throws {

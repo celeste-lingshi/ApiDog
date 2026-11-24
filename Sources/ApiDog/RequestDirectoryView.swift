@@ -5,6 +5,7 @@ struct RequestDirectoryView: View {
     let selectedID: UUID?
     @Binding var collapsed: Set<UUID>
     let select: (SavedRequest) -> Void
+    let duplicate: (SavedRequest) -> Void
 
     var body: some View {
         if directory.categories.isEmpty && directory.requests.isEmpty {
@@ -73,28 +74,43 @@ struct RequestDirectoryView: View {
 
     private func row(_ request: SavedRequest) -> some View {
         let selected = request.id == selectedID
-        return Button {
-            select(request)
-        } label: {
-            HStack(spacing: 7) {
-                Text(request.draft.method.rawValue)
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(Console.method(request.draft.method))
-                    .frame(width: 41, alignment: .leading)
-                Text(request.name)
-                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
+        return HStack(spacing: 2) {
+            Button {
+                select(request)
+            } label: {
+                HStack(spacing: 7) {
+                    Text(request.draft.method.rawValue)
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Console.method(request.draft.method))
+                        .frame(width: 41, alignment: .leading)
+                    Text(request.name)
+                        .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 8)
+                .frame(height: 32)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 8)
-            .frame(height: 32)
-            .consoleSurface(selected ? Console.selected : .clear,
-                            border: selected ? Console.accent.opacity(0.26) : .clear, radius: 6)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .help(request.draft.url.isEmpty ? request.name : request.draft.url)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+
+            Button {
+                duplicate(request)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 11))
+                    .foregroundStyle(selected ? Console.accent : Console.muted)
+                    .frame(width: 28, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("复制请求")
+            .accessibilityLabel("复制请求「\(request.name)」")
         }
-        .buttonStyle(.plain)
-        .help(request.draft.url.isEmpty ? request.name : request.draft.url)
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        .consoleSurface(selected ? Console.selected : .clear,
+                        border: selected ? Console.accent.opacity(0.26) : .clear, radius: 6)
     }
 }
 

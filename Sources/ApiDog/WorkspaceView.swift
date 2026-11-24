@@ -30,7 +30,10 @@ struct WorkspaceView: View {
         var command: Result<String, Error>
     }
 
-    private enum Modal: Equatable { case importCurl, clearHistory, newCategory, newRequest, saveRequest, removeRequest }
+    private enum Modal: Equatable {
+        case importCurl, clearHistory, newCategory, newRequest, saveRequest, removeRequest
+        case duplicateRequest(SavedRequest)
+    }
     private enum SidebarTab: String, CaseIterable { case directory = "请求目录", history = "请求历史" }
 
     private var directory: RequestDirectory { model.workspace.requestDirectory }
@@ -133,6 +136,16 @@ struct WorkspaceView: View {
                         }
                     case .newRequest, .saveRequest:
                         requestMetadataDialog(creating: modal == .newRequest)
+                    case .duplicateRequest(let source):
+                        RequestMetadataDialog(title: "复制请求", name: "\(source.name) 副本",
+                                              categories: directory.categories, categoryID: source.categoryID,
+                                              cancel: closeModal) { name, categoryID in
+                            let copy = source.duplicate(name: name, categoryID: categoryID)
+                            let canOpen = source.id == activeSavedID || draft == (activeSavedRequest?.draft ?? RequestDraft())
+                            storeRequest(copy)
+                            if canOpen { openSavedRequest(copy) }
+                            closeModal()
+                        }
                     case .removeRequest:
                         if let request = activeSavedRequest {
                             ConsoleConfirmationDialog(title: "删除「\(request.name)」？",
@@ -193,10 +206,7 @@ struct WorkspaceView: View {
                                      cancel: closeModal) { name, categoryID in
             let request = SavedRequest(id: existing?.id ?? UUID(), name: name, categoryID: categoryID,
                                        draft: creating ? RequestDraft() : draft)
-            model.workspace.requestDirectory.store(request)
-            model.save()
-            if let categoryID { collapsedCategories.remove(categoryID) }
-            sidebarTab = .directory
+            storeRequest(request)
             if creating {
                 openSavedRequest(request)
             } else {
@@ -204,6 +214,13 @@ struct WorkspaceView: View {
             }
             closeModal()
         }
+    }
+
+    private func storeRequest(_ request: SavedRequest) {
+        model.workspace.requestDirectory.store(request)
+        model.save()
+        if let categoryID = request.categoryID { collapsedCategories.remove(categoryID) }
+        sidebarTab = .directory
     }
 
     private func openSavedRequest(_ request: SavedRequest) {
@@ -234,8 +251,12 @@ struct WorkspaceView: View {
                 .padding(.bottom, 8)
             if sidebarTab == .directory {
                 RequestDirectoryView(directory: directory, selectedID: activeSavedID, collapsed: $collapsedCategories,
-                                     select: openSavedRequest)
-                    .disabled(isSending)
+                                     select: openSavedRequest) { request in
+                    var source = request
+                    if source.id == activeSavedID { source.draft = draft }
+                    openModal(.duplicateRequest(source))
+                }
+                .disabled(isSending)
             } else {
                 historyContents
             }
