@@ -15,6 +15,7 @@ struct WorkspaceView: View {
     @State private var historyQuery = ""
     @State private var showEnvironments = false
     @State private var showClearHistory = false
+    @State private var dropdown: WorkspaceDropdown?
     @FocusState private var urlFocused: Bool
 
     private enum RequestTab: String, CaseIterable { case headers = "请求头", body = "请求体" }
@@ -45,6 +46,24 @@ struct WorkspaceView: View {
         .foregroundStyle(Console.text)
         .background(Console.canvas)
         .tint(Console.accent)
+        .accessibilityHidden(dropdown != nil)
+        .overlayPreferenceValue(DropdownAnchors.self) { anchors in
+            GeometryReader { geometry in
+                if let dropdown, let anchor = anchors[dropdown] {
+                    let trigger = geometry[anchor]
+                    let left = dropdown == .method ? trigger.minX : trigger.maxX - dropdown.width
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { self.dropdown = nil }
+                        .accessibilityHidden(true)
+                    ConsoleDropdown(options: dropdownOptions(dropdown), width: dropdown.width) {
+                        self.dropdown = nil
+                    }
+                    .id(dropdown)
+                    .offset(x: max(8, left), y: trigger.maxY + 6)
+                }
+            }
+        }
         .onAppear { urlFocused = true }
         .sheet(isPresented: $showEnvironments) {
             EnvironmentEditor(
@@ -106,16 +125,15 @@ struct WorkspaceView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Console.muted)
                 Spacer()
-                Menu {
-                    Button("清空历史", role: .destructive) { showClearHistory = true }
-                        .disabled(model.workspace.history.isEmpty || isSending)
-                } label: {
-                    Image(systemName: "ellipsis").frame(width: 22, height: 22)
+                dropdownTrigger(.history, label: "历史操作") {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Console.muted)
+                        .frame(width: 26, height: 24)
+                        .consoleSurface(dropdown == .history ? Console.line : .clear,
+                                        border: Console.line, radius: 6)
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .accessibilityLabel("历史操作")
+                .disabled(model.workspace.history.isEmpty || isSending)
             }
             .padding(.horizontal, 16)
             .padding(.top, 19)
@@ -141,11 +159,10 @@ struct WorkspaceView: View {
                                 activeHistory = entry
                                 draft = entry.request
                                 requestTab = .headers
+                            } copyAddress: {
+                                copy(entry.request.url)
                             }
                             .disabled(isSending)
-                            .contextMenu {
-                                Button("复制请求地址") { copy(entry.request.url) }
-                            }
                         }
                     }
                     .padding(.horizontal, 8)
@@ -219,69 +236,88 @@ struct WorkspaceView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var environmentMenu: some View {
-        Menu {
-            Picker("当前环境", selection: Binding(
-                get: { model.workspace.selectedEnvironment?.id },
-                set: {
-                    model.workspace.selectedEnvironmentID = $0
-                    model.save()
-                }
-            )) {
-                ForEach(model.workspace.environments) { environment in
-                    Text(environment.name).tag(Optional(environment.id))
+    private func dropdownTrigger<Label: View>(
+        _ id: WorkspaceDropdown, label: String, @ViewBuilder content: () -> Label
+    ) -> some View {
+        Button {
+            urlFocused = false
+            dropdown = dropdown == id ? nil : id
+        } label: {
+            content()
+        }
+        .buttonStyle(.plain)
+        .anchorPreference(key: DropdownAnchors.self, value: .bounds) { [id: $0] }
+        .accessibilityLabel(label)
+    }
+
+    private func dropdownOptions(_ id: WorkspaceDropdown) -> [DropdownOption] {
+        switch id {
+        case .method:
+            return HTTPMethod.allCases.map { method in
+                DropdownOption(title: method.rawValue, tone: Console.method(method),
+                               monospaced: true, selected: method == draft.method) {
+                    draft.method = method
                 }
             }
-        } label: {
+        case .environment:
+            return model.workspace.environments.map { environment in
+                DropdownOption(title: environment.name, icon: "circle.grid.2x2",
+                               selected: environment.id == model.workspace.selectedEnvironment?.id) {
+                    model.workspace.selectedEnvironmentID = environment.id
+                    model.save()
+                }
+            }
+        case .history:
+            return [DropdownOption(title: "清空历史", icon: "trash", tone: Console.red) {
+                showClearHistory = true
+            }]
+        }
+    }
+
+    private var environmentMenu: some View {
+        let name = model.workspace.selectedEnvironment?.name ?? "默认"
+        return dropdownTrigger(.environment, label: "当前环境") {
             HStack(spacing: 7) {
                 Image(systemName: "circle.grid.2x2")
                     .foregroundStyle(Console.accent)
-                Text(model.workspace.selectedEnvironment?.name ?? "默认")
+                Text(name)
                     .lineLimit(1)
                     .frame(maxWidth: 130)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Console.muted)
+                dropdownChevron(.environment)
             }
             .font(.system(size: 12, weight: .medium))
             .padding(.horizontal, 9)
             .frame(height: 32)
-            .consoleSurface(Console.panel, radius: 7)
+            .consoleSurface(Console.panel, border: dropdown == .environment ? Console.accent : Console.line, radius: 7)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .accessibilityLabel("当前环境")
-        .accessibilityValue(model.workspace.selectedEnvironment?.name ?? "默认")
+        .accessibilityValue(name)
         .help("切换请求使用的环境")
+    }
+
+    private func dropdownChevron(_ id: WorkspaceDropdown) -> some View {
+        Image(systemName: dropdown == id ? "chevron.up" : "chevron.down")
+            .font(.system(size: 9, weight: .semibold))
+            .accessibilityHidden(true)
     }
 
     private var addressBar: some View {
         HStack(spacing: 9) {
-            Menu {
-                Picker("请求方法", selection: $draft.method) {
-                    ForEach(HTTPMethod.allCases, id: \.self) { method in
-                        Text(method.rawValue).tag(method)
-                    }
-                }
-            } label: {
+            let color = Console.method(draft.method)
+            dropdownTrigger(.method, label: "请求方法") {
                 HStack {
                     Text(draft.method.rawValue)
                         .font(.system(size: 12, weight: .bold, design: .monospaced))
                     Spacer(minLength: 4)
-                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+                    dropdownChevron(.method)
                 }
-                .foregroundStyle(Console.method(draft.method))
+                .foregroundStyle(color)
                 .padding(.horizontal, 10)
                 .frame(width: 88, height: 35)
-                .background(Console.method(draft.method).opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+                .consoleSurface(color.opacity(0.10),
+                                border: color.opacity(dropdown == .method ? 0.8 : 0.22), radius: 6)
                 .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
             .disabled(isSending)
-            .accessibilityLabel("请求方法")
             .accessibilityValue(draft.method.rawValue)
 
             TextField(text: $draft.url, prompt: Text("https://example.com/api 或 {{baseUrl}}/users")) {
@@ -500,6 +536,7 @@ struct WorkspaceView: View {
             return
         }
         guard hasAddress else { return }
+        dropdown = nil
 
         let template = draft
         let environment = model.workspace.selectedEnvironment
@@ -539,42 +576,60 @@ private struct HistoryRow: View {
     var entry: HistoryEntry
     var selected: Bool
     var open: () -> Void
+    var copyAddress: () -> Void
     @State private var hovered = false
 
     var body: some View {
-        Button(action: open) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack {
-                    Text(entry.request.method.rawValue)
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Console.method(entry.request.method))
-                    Spacer()
-                    Text(entry.status.map(String.init) ?? "失败")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Console.status(entry.status))
-                }
-                Text(entry.request.url)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                HStack(spacing: 5) {
-                    Text(entry.environment).lineLimit(1)
-                    Spacer()
-                    Text(entry.date.formatted(.dateTime.month().day().hour().minute()))
-                        .lineLimit(1)
-                }
-                .font(.system(size: 11))
-                .foregroundStyle(Console.muted)
+        HStack(spacing: 2) {
+            Button(action: open) {
+                details
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 8)
-            .consoleSurface(selected ? Console.selected : (hovered ? Console.panel : .clear),
-                            border: selected ? Console.accent.opacity(0.26) : .clear, radius: 7)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .help(entry.request.url)
+
+            Button(action: copyAddress) {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 11))
+                    .foregroundStyle(hovered || selected ? Console.accent : Console.muted)
+                    .frame(width: 26, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("复制请求地址")
+            .accessibilityLabel("复制请求地址")
         }
-        .buttonStyle(.plain)
+        .consoleSurface(selected ? Console.selected : (hovered ? Console.panel : .clear),
+                        border: selected ? Console.accent.opacity(0.26) : .clear, radius: 7)
         .onHover { hovered = $0 }
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .help(entry.request.url)
+    }
+
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(entry.request.method.rawValue)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Console.method(entry.request.method))
+                Spacer()
+                Text(entry.status.map(String.init) ?? "失败")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Console.status(entry.status))
+            }
+            Text(entry.request.url)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            HStack(spacing: 5) {
+                Text(entry.environment).lineLimit(1)
+                Spacer()
+                Text(entry.date.formatted(.dateTime.month().day().hour().minute()))
+                    .lineLimit(1)
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(Console.muted)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
     }
 }
