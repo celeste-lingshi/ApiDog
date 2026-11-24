@@ -4,8 +4,9 @@ import SwiftUI
 struct WorkspaceView: View {
     @StateObject private var model = WorkspaceModel()
     @State private var draft = RequestDraft()
-    @State private var requestTab = RequestTab.headers
-    @State private var responseTab = ResponseTab.body
+    @State private var requestTab = RequestTab.variables
+    @State private var responseTab = ResponseTab.curl
+    @State private var copiedCurl: String?
     @State private var result: ResponseDetails?
     @State private var error: String?
     @State private var activeHistory: HistoryEntry?
@@ -18,9 +19,11 @@ struct WorkspaceView: View {
     @State private var dropdown: WorkspaceDropdown?
     @FocusState private var urlFocused: Bool
 
-    private enum Modal: Equatable { case environments, clearHistory }
-    private enum RequestTab: String, CaseIterable { case headers = "请求头", body = "请求体" }
-    private enum ResponseTab: String, CaseIterable { case body = "正文", headers = "响应头" }
+    private enum Modal: Equatable { case importCurl, clearHistory }
+    private enum RequestTab: String, CaseIterable {
+        case variables = "变量", query = "查询", headers = "请求头", authentication = "认证", body = "请求体"
+    }
+    private enum ResponseTab: String, CaseIterable { case curl = "cURL", body = "正文", headers = "响应头" }
 
     private var isSending: Bool { requestTask != nil }
     private var hasAddress: Bool { !draft.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -54,7 +57,7 @@ struct WorkspaceView: View {
             GeometryReader { geometry in
                 if let dropdown, let anchor = anchors[dropdown] {
                     let trigger = geometry[anchor]
-                    let left = dropdown == .method ? trigger.minX : trigger.maxX - dropdown.width
+                    let left = dropdown == .history ? trigger.maxX - dropdown.width : trigger.minX
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture { self.dropdown = nil }
@@ -72,16 +75,12 @@ struct WorkspaceView: View {
             if let modal {
                 ConsoleModal {
                     switch modal {
-                    case .environments:
-                        EnvironmentEditor(
-                            environments: model.workspace.environments,
-                            selected: model.workspace.selectedEnvironment?.id,
-                            cancel: closeModal
-                        ) { environments in
-                            model.workspace.environments = environments
-                            model.workspace.selectedEnvironmentID = model.workspace.selectedEnvironment?.id
-                            model.save()
-                            closeModal()
+                    case .importCurl:
+                        CurlImportDialog(cancel: closeModal) { imported in
+                            draft = imported
+                            resetResponse()
+                            requestTab = startingTab(for: imported)
+                            self.modal = nil
                         }
                     case .clearHistory:
                         ClearHistoryDialog(cancel: closeModal) {
@@ -102,14 +101,22 @@ struct WorkspaceView: View {
 
     private var titleBar: some View {
         ConsoleTitleBar {
-            environmentMenu
             Button {
-                openModal(.environments)
+                openModal(.importCurl)
             } label: {
-                Label("变量", systemImage: "slider.horizontal.3")
+                Label("导入 cURL", systemImage: "square.and.arrow.down")
             }
             .buttonStyle(ConsoleButton())
+            .disabled(isSending)
         }
+    }
+
+    private func startingTab(for draft: RequestDraft) -> RequestTab {
+        if !draft.variableNames.isEmpty { return .variables }
+        if draft.auth.mode != .none { return .authentication }
+        if !draft.headers.isEmpty { return .headers }
+        if !draft.query.isEmpty { return .query }
+        return draft.body == nil ? .variables : .body
     }
 
     private func openModal(_ target: Modal) {
@@ -128,7 +135,7 @@ struct WorkspaceView: View {
             Button {
                 dropdown = nil
                 draft = RequestDraft()
-                requestTab = .headers
+                requestTab = .variables
                 resetResponse()
                 urlFocused = true
             } label: {
@@ -181,8 +188,8 @@ struct WorkspaceView: View {
                             HistoryRow(entry: entry, selected: entry.id == activeHistory?.id) {
                                 resetResponse()
                                 activeHistory = entry
-                                draft = entry.request
-                                requestTab = .headers
+                                draft = model.workspace.draft(for: entry)
+                                requestTab = startingTab(for: draft)
                             } copyAddress: {
                                 copy(entry.request.url)
                             }
@@ -234,8 +241,8 @@ struct WorkspaceView: View {
                     : AnyLayout(VStackLayout(alignment: .leading, spacing: 14))
                 layout {
                     requestPanel
-                        .frame(width: wide ? geometry.size.width * 0.40 : nil,
-                               height: wide ? nil : 166)
+                        .frame(width: wide ? geometry.size.width * 0.46 : nil,
+                               height: wide ? nil : 218)
                     responsePanel
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -270,12 +277,12 @@ struct WorkspaceView: View {
                     draft.method = method
                 }
             }
-        case .environment:
-            return model.workspace.environments.map { environment in
-                DropdownOption(title: environment.name, icon: "circle.grid.2x2",
-                               selected: environment.id == model.workspace.selectedEnvironment?.id) {
-                    model.workspace.selectedEnvironmentID = environment.id
-                    model.save()
+        case .authentication:
+            return RequestAuthentication.Mode.allCases.map { mode in
+                DropdownOption(title: mode.title, icon: "key", selected: mode == draft.auth.mode) {
+                    if mode != draft.auth.mode {
+                        draft.auth = RequestAuthentication(mode: mode, name: mode == .apiKey ? "X-API-Key" : "")
+                    }
                 }
             }
         case .history:
@@ -283,26 +290,6 @@ struct WorkspaceView: View {
                 openModal(.clearHistory)
             }]
         }
-    }
-
-    private var environmentMenu: some View {
-        let name = model.workspace.selectedEnvironment?.name ?? "默认"
-        return dropdownTrigger(.environment, label: "当前环境") {
-            HStack(spacing: 7) {
-                Image(systemName: "circle.grid.2x2")
-                    .foregroundStyle(Console.accent)
-                Text(name)
-                    .lineLimit(1)
-                    .frame(maxWidth: 130, alignment: .leading)
-                dropdownChevron(.environment)
-            }
-            .font(.system(size: 12, weight: .medium))
-            .padding(.horizontal, 9)
-            .frame(height: 32)
-            .consoleSurface(Console.panel, border: dropdown == .environment ? Console.accent : Console.line, radius: 7)
-        }
-        .accessibilityValue(name)
-        .help("切换请求使用的环境")
     }
 
     private func dropdownChevron(_ id: WorkspaceDropdown) -> some View {
@@ -331,13 +318,16 @@ struct WorkspaceView: View {
             .disabled(isSending)
             .accessibilityValue(draft.method.rawValue)
 
-            TextField(text: $draft.url, prompt: Text("https://example.com/api 或 {{baseUrl}}/users")) {
+            TextField(text: $draft.url, prompt: Text("http://111/{hostname}/ping")) {
                 Text("请求地址")
             }
             .font(.system(size: 13, design: .monospaced))
             .textFieldStyle(.plain)
             .foregroundStyle(Console.text)
             .focused($urlFocused)
+            .onChange(of: draft.url) { _ in
+                if urlFocused && !draft.variableNames.isEmpty { requestTab = .variables }
+            }
             .disabled(isSending)
             .onSubmit { if hasAddress && !isSending { sendOrCancel() } }
 
@@ -361,29 +351,100 @@ struct WorkspaceView: View {
 
     private var requestPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            panelTitle("请求参数", symbol: "slider.horizontal.3")
-                .padding(.horizontal, 12)
-                .frame(height: 46)
+            HStack(spacing: 6) {
+                panelTitle("请求参数", symbol: "slider.horizontal.3")
+                Spacer(minLength: 0)
+                Toggle("跟随跳转", isOn: $draft.followsRedirects)
+                    .toggleStyle(ConsoleCheckbox())
+                    .accessibilityLabel("跟随跳转")
+                Text("跟随跳转")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Console.muted)
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 46)
 
             ConsoleTabs(tabs: RequestTab.allCases, selection: $requestTab) { $0.rawValue }
                 .padding(.horizontal, 12)
 
             ConsoleRule()
-            if requestTab == .headers {
-                editor($draft.headers, label: "请求头", placeholder: "Content-Type: application/json")
-            } else if draft.method.allowsBody {
-                editor($draft.body, label: "请求体", placeholder: #"{"name":"ApiDog"}"#)
-            } else {
-                Text("\(draft.method.rawValue) 请求不会发送请求体。")
-                    .font(.callout)
-                    .foregroundStyle(Console.muted)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            switch requestTab {
+            case .variables:
+                RequestVariablesEditor(names: draft.variableNames, values: $draft.variables)
+            case .query:
+                RequestFieldsEditor(fields: $draft.query, header: false)
+            case .headers:
+                RequestFieldsEditor(fields: $draft.headers, header: true)
+            case .authentication:
+                authenticationEditor
+            case .body:
+                if draft.method.allowsBody {
+                    editor(Binding(
+                        get: { draft.body ?? "" },
+                        set: { draft.body = $0.isEmpty ? nil : $0 }
+                    ), label: "请求体", placeholder: #"{"name":"ApiDog"}"#)
+                } else {
+                    Text("\(draft.method.rawValue) 请求不会发送请求体。")
+                        .font(.callout)
+                        .foregroundStyle(Console.muted)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .consoleSurface()
         .disabled(isSending)
+    }
+
+    private var authenticationEditor: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                dropdownTrigger(.authentication, label: "认证方式") {
+                    HStack(spacing: 8) {
+                        Image(systemName: "key").foregroundStyle(Console.accent)
+                        Text(draft.auth.mode.title)
+                        Spacer(minLength: 0)
+                        dropdownChevron(.authentication)
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(.horizontal, 9)
+                    .frame(height: 32)
+                    .consoleSurface(Console.input, border: dropdown == .authentication ? Console.accent : Console.line, radius: 6)
+                }
+                .accessibilityValue(draft.auth.mode.title)
+                switch draft.auth.mode {
+                case .none:
+                    Text("选择认证方式后，按字段填写。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Console.muted)
+                case .bearer:
+                    authRow("Token") { SecureField("填 Token", text: authenticationSecret).requestInput() }
+                case .basic:
+                    authRow("用户名") { TextField("填用户名", text: $draft.auth.name).requestInput() }
+                    authRow("密码") { SecureField("填密码", text: authenticationSecret).requestInput() }
+                case .apiKey:
+                    authRow("请求头名") { TextField("X-API-Key", text: $draft.auth.name).requestInput() }
+                    authRow("值") { SecureField("填 API Key", text: authenticationSecret).requestInput() }
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    private var authenticationSecret: Binding<String> {
+        Binding(get: { draft.auth.secret ?? "" }, set: { draft.auth.secret = $0 })
+    }
+
+    private func authRow<Input: View>(_ label: String, @ViewBuilder input: () -> Input) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(Console.muted)
+                .frame(width: 60, alignment: .leading)
+            input().accessibilityLabel(label)
+        }
     }
 
     private func editor(_ text: Binding<String>, label: String, placeholder: String) -> some View {
@@ -407,11 +468,16 @@ struct WorkspaceView: View {
     }
 
     private var responsePanel: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let prepared = Result { try draft.makeRequest() }
+        let command = (try? prepared.get()).map {
+            CurlCommand.render($0, followsRedirects: draft.followsRedirects)
+        }
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                panelTitle("响应", symbol: "arrow.down.left")
+                panelTitle(responseTab == .curl ? "cURL 预览" : "响应",
+                           symbol: responseTab == .curl ? "terminal" : "arrow.down.left")
                 Spacer(minLength: 4)
-                if let entry = activeHistory {
+                if responseTab != .curl, let entry = activeHistory {
                     let statusColor = Console.status(entry.status)
                     Text(entry.status.map { "HTTP \($0)" } ?? "请求失败")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -422,7 +488,6 @@ struct WorkspaceView: View {
                     Text("\(entry.milliseconds) ms")
                         .font(Console.mono)
                         .foregroundStyle(Console.muted)
-                        .help("请求耗时 \(entry.milliseconds) 毫秒，环境 \(entry.environment)")
                 }
             }
             .padding(.horizontal, 12)
@@ -430,13 +495,21 @@ struct WorkspaceView: View {
 
             HStack(spacing: 10) {
                 ConsoleTabs(tabs: ResponseTab.allCases, selection: $responseTab) { $0.rawValue }
-                    .disabled(result == nil)
                 Spacer(minLength: 0)
-                if let result {
+                if responseTab == .curl, let command {
+                    Button {
+                        if copy(command) { copiedCurl = command }
+                    } label: {
+                        Label(copiedCurl == command ? "已复制" : "复制命令",
+                              systemImage: copiedCurl == command ? "checkmark" : "doc.on.doc")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Console.accent)
+                } else if responseTab != .curl, let result {
                     Text(result.truncated ? "前 256 KiB" : "\(result.byteCount.formatted()) B")
                         .font(Console.mono)
                         .foregroundStyle(Console.muted)
-                        .help(result.truncated ? "响应正文已截断，仅显示前 256 KiB" : "响应正文大小")
                     Button {
                         if copy(responseTab == .body ? result.body : result.headers) {
                             copiedTab = responseTab
@@ -455,7 +528,34 @@ struct WorkspaceView: View {
             .onChange(of: responseTab) { _ in copiedTab = nil }
 
             ConsoleRule()
-            responseContent
+            if responseTab == .curl {
+                if let command {
+                    ScrollView {
+                        Text(verbatim: command)
+                            .font(Console.mono)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(14)
+                    }
+                    if draft.auth.mode != .none {
+                        Label("预览包含认证信息", systemImage: "lock")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Console.muted)
+                            .padding([.horizontal, .bottom], 12)
+                    }
+                } else {
+                    switch prepared {
+                    case .failure(let error):
+                        responseMessage("等待补全请求",
+                                        detail: hasAddress ? error.localizedDescription : "填写地址后实时生成命令。",
+                                        symbol: "terminal")
+                    case .success:
+                        EmptyView()
+                    }
+                }
+            } else {
+                responseContent
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .consoleSurface()
@@ -532,7 +632,8 @@ struct WorkspaceView: View {
         error = nil
         requestCancelled = false
         copiedTab = nil
-        responseTab = .body
+        copiedCurl = nil
+        responseTab = .curl
     }
 
     @discardableResult
@@ -550,8 +651,8 @@ struct WorkspaceView: View {
         dropdown = nil
 
         let template = draft
-        let environment = model.workspace.selectedEnvironment
         resetResponse()
+        responseTab = .body
         let start = Date()
         let clock = ContinuousClock()
         let started = clock.now
@@ -559,8 +660,8 @@ struct WorkspaceView: View {
         requestTask = Task {
             defer { requestTask = nil }
             do {
-                let request = try template.makeRequest(variables: environment?.values ?? [:])
-                let response = try await HTTPClient.send(request)
+                let request = try template.makeRequest()
+                let response = try await HTTPClient.send(request, followsRedirects: template.followsRedirects)
                 try Task.checkCancellation()
                 result = response
             } catch {
@@ -573,7 +674,7 @@ struct WorkspaceView: View {
             let elapsed = started.duration(to: clock.now).components
             let milliseconds = Int(elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000)
             let entry = HistoryEntry(
-                date: start, request: template, environment: environment?.name ?? "默认",
+                date: start, request: template,
                 status: result?.status, milliseconds: milliseconds
             )
             model.workspace.append(entry)
@@ -631,7 +732,7 @@ private struct HistoryRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             HStack(spacing: 5) {
-                Text(entry.environment).lineLimit(1)
+                if let environment = entry.environment { Text(environment).lineLimit(1) }
                 Spacer()
                 Text(entry.date.formatted(.dateTime.month().day().hour().minute()))
                     .lineLimit(1)

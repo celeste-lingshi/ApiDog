@@ -19,31 +19,29 @@ struct RequestEnvironment: Identifiable, Codable, Equatable {
             uniquingKeysWith: { _, latest in latest }
         )
     }
-
-    var isValid: Bool {
-        let names = variables.map(\.name)
-        return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && names.allSatisfy(RequestDraft.isVariableName)
-            && Set(names).count == names.count
-    }
 }
 
 struct HistoryEntry: Identifiable, Codable, Equatable {
     var id = UUID()
     var date: Date
     var request: RequestDraft
-    var environment: String
+    var environment: String? = nil
     var status: Int?
     var milliseconds: Int
 }
 
 struct Workspace: Codable, Equatable {
-    var environments = [RequestEnvironment(name: "默认")]
+    var environments: [RequestEnvironment] = []
     var selectedEnvironmentID: UUID?
     var history: [HistoryEntry] = []
 
-    var selectedEnvironment: RequestEnvironment? {
-        environments.first { $0.id == selectedEnvironmentID } ?? environments.first
+    func draft(for entry: HistoryEntry) -> RequestDraft {
+        var draft = entry.request
+        let values = environments.first(where: { $0.name == entry.environment })?.values ?? [:]
+        for name in draft.variableNames where draft.variables[name] == nil {
+            draft.variables[name] = values[name]
+        }
+        return draft
     }
 
     func matchingHistory(_ query: String) -> [HistoryEntry] {
@@ -51,7 +49,7 @@ struct Workspace: Codable, Equatable {
         guard !term.isEmpty else { return history }
         return history.filter { entry in
             let status = entry.status.map(String.init) ?? "失败"
-            return [entry.request.url, entry.request.method.rawValue, entry.environment, status]
+            return [entry.request.url, entry.request.method.rawValue, entry.environment ?? "", status]
                 .contains { $0.localizedStandardContains(term) }
         }
     }
@@ -84,6 +82,9 @@ struct WorkspaceStorage {
                 where persisted.environments[environment].variables[variable].sessionOnly {
                 persisted.environments[environment].variables[variable].value = ""
             }
+        }
+        for entry in persisted.history.indices {
+            persisted.history[entry].request = persisted.history[entry].request.withoutStoredAuthentication()
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
