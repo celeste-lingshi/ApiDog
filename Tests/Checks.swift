@@ -3,12 +3,14 @@ import Foundation
 @main
 struct Checks {
     static func main() async throws {
+        if AuthScript.runWorkerIfRequested() { return }
         try checkRequest()
         try checkWorkspace()
         try checkCurl()
+        try checkGeneratedAuthentication()
         try await checkResponse()
         try await checkCancellation()
-        print("通过：请求内变量和认证、旧历史读取、凭证落盘、cURL 导入导出、响应处理、请求取消")
+        print("通过：请求内变量和认证、旧历史读取、凭证落盘、签名、脚本认证、cURL 导入导出、响应处理、请求取消")
     }
 
     static func checkRequest() throws {
@@ -141,6 +143,91 @@ struct Checks {
                 preconditionFailure("错误地导入了命令")
             } catch {}
         }
+    }
+
+    static func checkGeneratedAuthentication() throws {
+        let time = Date(timeIntervalSince1970: 1_700_000_000)
+        let signature = "iuEohmE1vIhncyWDr5w_k7MaTlVbk7jfiX8QEUAO6ZE"
+        var signed = RequestDraft(
+            url: "https://example.com/api/v1/{hostname}/ping?debug=1",
+            variables: ["hostname": "node/a"],
+            auth: RequestAuthentication(mode: .hmac, name: "demo-key", secret: "demo-secret")
+        )
+        let request = try signed.makeRequest(at: time)
+        precondition(request.url?.absoluteString ==
+            "https://example.com/api/v1/node%2Fa/ping?debug=1&apikey=demo-key&sign=\(signature)&timestamp=1700000000")
+        precondition(!(request.url?.absoluteString ?? "").contains("demo-secret"))
+        let redacted = signed.withoutStoredAuthentication()
+        precondition(redacted.auth.name.isEmpty && redacted.auth.secret == nil)
+        let later = try signed.makeRequest(at: time.addingTimeInterval(1))
+        precondition(later.url?.absoluteString.hasSuffix("timestamp=1700000001") == true)
+        precondition(later.url?.absoluteString.contains(signature) == false)
+
+        signed.auth.placement = .header
+        signed.auth.signingURI = "/custom/path"
+        let headers = try signed.makeRequest(at: time)
+        precondition(headers.url?.absoluteString == "https://example.com/api/v1/node%2Fa/ping?debug=1&timestamp=1700000000")
+        precondition(headers.value(forHTTPHeaderField: "apikey") == "demo-key")
+        precondition(headers.value(forHTTPHeaderField: "sign") == "-VN97RyUsnGZzyxDOtrTgBvoQtMVea3ZtlAG9ykzMyo")
+
+        signed.auth.placement = .body
+        signed.method = .post
+        signed.body = #"{"label":"example"}"#
+        let bodyRequest = try signed.makeRequest(at: time)
+        let body = try JSONSerialization.jsonObject(with: bodyRequest.httpBody!) as? [String: String]
+        precondition(body?["label"] == "example" && body?["apikey"] == "demo-key")
+        precondition(body?["sign"] == "-VN97RyUsnGZzyxDOtrTgBvoQtMVea3ZtlAG9ykzMyo")
+        precondition(bodyRequest.value(forHTTPHeaderField: "Content-Type") == "application/json")
+        signed.query = [RequestField("timestamp", "1")]
+        do {
+            _ = try signed.makeRequest(at: time)
+            preconditionFailure("允许了重复时间戳")
+        } catch RequestError.duplicateAuthentication("timestamp") {}
+
+        var scripted = RequestDraft(
+            method: .post, url: "https://example.com/api/v1/{hostname}/ping?debug=1",
+            variables: ["hostname": "node/a", "privateInput": "demo-secret"],
+            auth: RequestAuthentication(
+                mode: .script,
+                script: """
+                if (typeof fetch !== "undefined" || typeof require !== "undefined" || typeof ObjC !== "undefined") {
+                    throw new Error("不应暴露系统接口");
+                }
+                const message = [inputs.key, inputs.secret, request.uri, timestamp].join("_");
+                return {
+                    headers: { "X-Method": request.method },
+                    query: { timestamp, sign: crypto.hmacSHA256Base64URL(inputs.secret, message) },
+                    body: { debug: request.query[0].value, metadata: { ok: true } }
+                };
+                """,
+                scriptInputs: [RequestField("key", "demo-key"), RequestField("secret", "{privateInput}")]
+            ),
+            body: #"{"label":"example"}"#
+        )
+        let custom = try scripted.makeRequest(at: time)
+        precondition(custom.url?.absoluteString ==
+            "https://example.com/api/v1/node%2Fa/ping?debug=1&sign=\(signature)&timestamp=1700000000")
+        precondition(custom.value(forHTTPHeaderField: "X-Method") == "POST")
+        let customBody = try JSONSerialization.jsonObject(with: custom.httpBody!) as? [String: Any]
+        precondition(customBody?["label"] as? String == "example" && customBody?["debug"] as? String == "1")
+        precondition((customBody?["metadata"] as? [String: Bool])?["ok"] == true)
+        let stored = scripted.withoutStoredAuthentication()
+        precondition(stored.auth.script == scripted.auth.script && stored.auth.scriptInputs?.allSatisfy { $0.value == nil } == true)
+        precondition(stored.variables == ["hostname": "node/a"])
+
+        scripted.auth.script = "return { query: { timestamp: 123 } };"
+        do {
+            _ = try scripted.makeRequest(at: time)
+            preconditionFailure("接受了非字符串查询值")
+        } catch RequestError.invalidAuthOutput {}
+
+        scripted.auth.script = "while (true) {}"
+        let started = ContinuousClock.now
+        do {
+            _ = try scripted.makeRequest(at: time)
+            preconditionFailure("超时脚本仍返回了结果")
+        } catch RequestError.authScriptInterrupted {}
+        precondition(started.duration(to: .now) < .seconds(5))
     }
 
     static func checkCancellation() async throws {

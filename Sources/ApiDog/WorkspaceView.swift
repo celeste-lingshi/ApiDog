@@ -7,6 +7,8 @@ struct WorkspaceView: View {
     @State private var requestTab = RequestTab.variables
     @State private var responseTab = ResponseTab.curl
     @State private var copiedCurl: String?
+    @State private var generatedPreview: AuthPreview?
+    @State private var copyingGeneratedCurl = false
     @State private var result: ResponseDetails?
     @State private var error: String?
     @State private var activeHistory: HistoryEntry?
@@ -18,6 +20,11 @@ struct WorkspaceView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropdown: WorkspaceDropdown?
     @FocusState private var urlFocused: Bool
+
+    private struct AuthPreview {
+        var draft: RequestDraft
+        var command: Result<String, Error>
+    }
 
     private enum Modal: Equatable { case importCurl, clearHistory }
     private enum RequestTab: String, CaseIterable {
@@ -71,6 +78,17 @@ struct WorkspaceView: View {
             }
         }
         .onAppear { urlFocused = true }
+        .task(id: draft) {
+            let snapshot = draft
+            generatedPreview = nil
+            guard snapshot.auth.generated else { return }
+            do {
+                try await Task.sleep(nanoseconds: 180_000_000)
+                let command = await preview(snapshot)
+                try Task.checkCancellation()
+                generatedPreview = AuthPreview(draft: snapshot, command: command)
+            } catch {}
+        }
         .overlay {
             if let modal {
                 ConsoleModal {
@@ -281,8 +299,15 @@ struct WorkspaceView: View {
             return RequestAuthentication.Mode.allCases.map { mode in
                 DropdownOption(title: mode.title, icon: "key", selected: mode == draft.auth.mode) {
                     if mode != draft.auth.mode {
-                        draft.auth = RequestAuthentication(mode: mode, name: mode == .apiKey ? "X-API-Key" : "")
+                        draft.auth = RequestAuthentication(mode: mode, name: mode == .apiKey ? "X-API-Key" : "",
+                            scriptInputs: mode == .script ? [RequestField("token", nil)] : nil)
                     }
+                }
+            }
+        case .authLocation:
+            return RequestAuthentication.Location.allCases.map { location in
+                DropdownOption(title: location.title, selected: location == draft.auth.location) {
+                    draft.auth.placement = location
                 }
             }
         case .history:
@@ -425,12 +450,43 @@ struct WorkspaceView: View {
                     authRow("用户名") { TextField("填用户名", text: $draft.auth.name).requestInput() }
                     authRow("密码") { SecureField("填密码", text: authenticationSecret).requestInput() }
                 case .apiKey:
-                    authRow("请求头名") { TextField("X-API-Key", text: $draft.auth.name).requestInput() }
+                    authRow("字段名") { TextField("X-API-Key", text: $draft.auth.name).requestInput() }
                     authRow("值") { SecureField("填 API Key", text: authenticationSecret).requestInput() }
+                    authRow("位置") { authLocation }
+                case .hmac:
+                    authRow("API Key") { TextField("填 apikey", text: $draft.auth.name).requestInput() }
+                    authRow("Secure Key") { SecureField("填 securekey", text: authenticationSecret).requestInput() }
+                    authRow("签名 URI") {
+                        TextField("默认使用请求路径", text: Binding(
+                            get: { draft.auth.signingURI ?? "" },
+                            set: { draft.auth.signingURI = $0 }
+                        )).requestInput()
+                    }
+                    authRow("位置") { authLocation }
+                    Text("apikey 和 sign 使用所选位置。timestamp 自动填入 URL 查询。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Console.muted)
+                case .script:
+                    AuthScriptEditor(auth: $draft.auth)
                 }
             }
             .padding(12)
         }
+    }
+
+    private var authLocation: some View {
+        dropdownTrigger(.authLocation, label: "认证字段位置") {
+            HStack {
+                Text(draft.auth.location.title)
+                Spacer(minLength: 0)
+                dropdownChevron(.authLocation)
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+            .consoleSurface(Console.input, border: dropdown == .authLocation ? Console.accent : Console.line, radius: 6)
+        }
+        .accessibilityValue(draft.auth.location.title)
     }
 
     private var authenticationSecret: Binding<String> {
@@ -442,7 +498,7 @@ struct WorkspaceView: View {
             Text(label)
                 .font(.system(size: 12))
                 .foregroundStyle(Console.muted)
-                .frame(width: 60, alignment: .leading)
+                .frame(width: 76, alignment: .leading)
             input().accessibilityLabel(label)
         }
     }
@@ -468,10 +524,15 @@ struct WorkspaceView: View {
     }
 
     private var responsePanel: some View {
-        let prepared = Result { try draft.makeRequest() }
-        let command = (try? prepared.get()).map {
-            CurlCommand.render($0, followsRedirects: draft.followsRedirects)
+        let prepared: Result<String, Error>?
+        if draft.auth.generated {
+            prepared = generatedPreview?.draft == draft ? generatedPreview?.command : nil
+        } else {
+            prepared = Result {
+                CurlCommand.render(try draft.makeRequest(), followsRedirects: draft.followsRedirects)
+            }
         }
+        let command = try? prepared?.get()
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 panelTitle(responseTab == .curl ? "cURL 预览" : "响应",
@@ -498,7 +559,7 @@ struct WorkspaceView: View {
                 Spacer(minLength: 0)
                 if responseTab == .curl, let command {
                     Button {
-                        if copy(command) { copiedCurl = command }
+                        copyCurl(command)
                     } label: {
                         Label(copiedCurl == command ? "已复制" : "复制命令",
                               systemImage: copiedCurl == command ? "checkmark" : "doc.on.doc")
@@ -506,6 +567,7 @@ struct WorkspaceView: View {
                     .font(.system(size: 12, weight: .medium))
                     .buttonStyle(.plain)
                     .foregroundStyle(Console.accent)
+                    .disabled(copyingGeneratedCurl)
                 } else if responseTab != .curl, let result {
                     Text(result.truncated ? "前 256 KiB" : "\(result.byteCount.formatted()) B")
                         .font(Console.mono)
@@ -538,19 +600,19 @@ struct WorkspaceView: View {
                             .padding(14)
                     }
                     if draft.auth.mode != .none {
-                        Label("预览包含认证信息", systemImage: "lock")
+                        Label(draft.auth.generated ? "含认证信息，复制和发送会重新生成" : "预览包含认证信息",
+                              systemImage: "lock")
                             .font(.system(size: 11))
                             .foregroundStyle(Console.muted)
                             .padding([.horizontal, .bottom], 12)
                     }
                 } else {
-                    switch prepared {
-                    case .failure(let error):
-                        responseMessage("等待补全请求",
-                                        detail: hasAddress ? error.localizedDescription : "填写地址后实时生成命令。",
-                                        symbol: "terminal")
-                    case .success:
-                        EmptyView()
+                    if !hasAddress {
+                        responseMessage("等待补全请求", detail: "填写地址后实时生成命令。", symbol: "terminal")
+                    } else if case .failure(let error)? = prepared {
+                        responseMessage("等待补全请求", detail: error.localizedDescription, symbol: "terminal")
+                    } else {
+                        responseMessage("正在生成认证", symbol: "key")
                     }
                 }
             } else {
@@ -642,6 +704,31 @@ struct WorkspaceView: View {
         return NSPasteboard.general.setString(text, forType: .string)
     }
 
+    private func preview(_ snapshot: RequestDraft) async -> Result<String, Error> {
+        do {
+            let request = try await snapshot.prepareRequest()
+            return .success(CurlCommand.render(request, followsRedirects: snapshot.followsRedirects))
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func copyCurl(_ command: String) {
+        if !draft.auth.generated {
+            if copy(command) { copiedCurl = command }
+            return
+        }
+        let snapshot = draft
+        copyingGeneratedCurl = true
+        Task {
+            defer { copyingGeneratedCurl = false }
+            let result = await preview(snapshot)
+            guard draft == snapshot else { return }
+            generatedPreview = AuthPreview(draft: snapshot, command: result)
+            if case .success(let fresh) = result, copy(fresh) { copiedCurl = fresh }
+        }
+    }
+
     private func sendOrCancel() {
         if let requestTask {
             requestTask.cancel()
@@ -660,7 +747,13 @@ struct WorkspaceView: View {
         requestTask = Task {
             defer { requestTask = nil }
             do {
-                let request = try template.makeRequest()
+                let request = try await template.prepareRequest()
+                try Task.checkCancellation()
+                if template.auth.generated {
+                    generatedPreview = AuthPreview(draft: template, command: .success(
+                        CurlCommand.render(request, followsRedirects: template.followsRedirects)
+                    ))
+                }
                 let response = try await HTTPClient.send(request, followsRedirects: template.followsRedirects)
                 try Task.checkCancellation()
                 result = response

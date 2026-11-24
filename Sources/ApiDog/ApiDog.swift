@@ -1,6 +1,12 @@
 import SwiftUI
 
 @main
+enum ApiDogMain {
+    @MainActor static func main() {
+        if !AuthScript.runWorkerIfRequested() { ApiDogApp.main() }
+    }
+}
+
 struct ApiDogApp: App {
     var body: some Scene {
         Window("ApiDog", id: "workspace") {
