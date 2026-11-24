@@ -1,13 +1,13 @@
 import SwiftUI
 
 enum WorkspaceDropdown: Hashable {
-    case method, authentication, authLocation, history, directory
+    case method, authentication, authLocation, history, directory, theme
 
     var width: CGFloat {
         switch self {
         case .method: return 144
         case .authentication, .authLocation: return 188
-        case .history, .directory: return 166
+        case .history, .directory, .theme: return 166
         }
     }
 }

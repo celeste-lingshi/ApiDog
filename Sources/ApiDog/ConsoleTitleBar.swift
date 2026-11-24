@@ -50,7 +50,7 @@ struct ConsoleTitleBar<Actions: View>: View {
     }
 
     private var wordmark: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Group {
                 if let icon = Bundle.main.image(forResource: "ApiDog") {
                     Image(nsImage: icon).resizable().scaledToFit()
@@ -62,7 +62,7 @@ struct ConsoleTitleBar<Actions: View>: View {
                         .consoleSurface(Console.accent.opacity(0.10), border: Console.accent.opacity(0.24), radius: 8)
                 }
             }
-            .frame(width: 30, height: 30)
+            .frame(width: 42, height: 42)
             .accessibilityHidden(true)
             Text("ApiDog")
                 .font(.system(size: 17, weight: .semibold))

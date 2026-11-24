@@ -21,6 +21,7 @@ struct WorkspaceView: View {
     @State private var activeSavedID: UUID?
     @State private var collapsedCategories: Set<UUID> = []
     @State private var modal: Modal?
+    @AppStorage("theme") private var theme = ConsoleTheme.dark
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropdown: WorkspaceDropdown?
     @FocusState private var urlFocused: Bool
@@ -83,7 +84,7 @@ struct WorkspaceView: View {
             GeometryReader { geometry in
                 if let dropdown, let anchor = anchors[dropdown] {
                     let trigger = geometry[anchor]
-                    let left = [.history, .directory].contains(dropdown) ? trigger.maxX - dropdown.width : trigger.minX
+                    let left = [.history, .directory, .theme].contains(dropdown) ? trigger.maxX - dropdown.width : trigger.minX
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture { self.dropdown = nil }
@@ -177,10 +178,24 @@ struct WorkspaceView: View {
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: modal)
         .ignoresSafeArea(.container, edges: .top)
+        .preferredColorScheme(theme.colorScheme)
     }
 
     private var titleBar: some View {
         ConsoleTitleBar {
+            dropdownTrigger(.theme, label: "主题") {
+                HStack(spacing: 7) {
+                    Image(systemName: theme.icon)
+                    Text("主题")
+                    dropdownChevron(.theme)
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Console.text)
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .consoleSurface(Console.panel, border: dropdown == .theme ? Console.accent : Console.line, radius: 7)
+            }
+            .accessibilityValue(theme.title)
             Button {
                 openModal(.importCurl)
             } label: {
@@ -429,6 +444,12 @@ struct WorkspaceView: View {
 
     private func dropdownOptions(_ id: WorkspaceDropdown) -> [DropdownOption] {
         switch id {
+        case .theme:
+            return ConsoleTheme.allCases.map { option in
+                DropdownOption(title: option.title, icon: option.icon, selected: option == theme) {
+                    theme = option
+                }
+            }
         case .method:
             return HTTPMethod.allCases.map { method in
                 DropdownOption(title: method.rawValue, tone: Console.method(method),
@@ -672,7 +693,7 @@ struct WorkspaceView: View {
                         TextField(draft.auth.signingKeyInput ?? "填 apikey", text: $draft.auth.name).requestInput()
                     }
                     authRow("Secure Key") {
-                        SecureField(draft.auth.signingSecretInput ?? "填 securekey", text: authenticationSecret).requestInput()
+                        TextField(draft.auth.signingSecretInput ?? "填 securekey", text: authenticationSecret).requestInput()
                     }
                     authRow("Key 字段") {
                         TextField("apikey", text: Binding(

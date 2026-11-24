@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -8,15 +9,24 @@ enum ApiDogMain {
 }
 
 struct ApiDogApp: App {
+    @NSApplicationDelegateAdaptor(ApiDogAppDelegate.self) private var delegate
+
     var body: some Scene {
         Window("ApiDog", id: "workspace") {
             WorkspaceView()
-                .preferredColorScheme(.dark)
         }
         .defaultSize(width: 1200, height: 740)
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {}
+        }
+    }
+}
+
+private final class ApiDogAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if let icon = Bundle.main.image(forResource: "ApiDog") {
+            NSApplication.shared.applicationIconImage = icon
         }
     }
 }

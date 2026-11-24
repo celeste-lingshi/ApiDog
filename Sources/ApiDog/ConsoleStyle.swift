@@ -1,20 +1,49 @@
+import AppKit
 import SwiftUI
 
+enum ConsoleTheme: String, CaseIterable {
+    case system, light, dark
+
+    var title: String {
+        switch self {
+        case .system: return "跟随系统"
+        case .light: return "浅色"
+        case .dark: return "深色"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .system: return "circle.lefthalf.filled"
+        case .light: return "sun.max"
+        case .dark: return "moon"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
 enum Console {
-    static let header = rgb(0x161C26)
-    static let canvas = rgb(0x11151D)
-    static let sidebar = rgb(0x0C1017)
-    static let panel = rgb(0x171D27)
-    static let input = rgb(0x10151E)
-    static let line = rgb(0x2B3646)
-    static let selected = rgb(0x20362F)
-    static let text = rgb(0xE9EEF5)
-    static let muted = rgb(0x9CAABC)
-    static let accent = rgb(0x77E8C9)
-    static let blue = rgb(0x89B6FF)
-    static let amber = rgb(0xF3C677)
-    static let red = rgb(0xFF929D)
-    static let purple = rgb(0xC5ADFB)
+    static let header = rgb(0x161C26, light: 0xF8FAFC)
+    static let canvas = rgb(0x11151D, light: 0xEFF3F7)
+    static let sidebar = rgb(0x0C1017, light: 0xE6EDF4)
+    static let panel = rgb(0x171D27, light: 0xFFFFFF)
+    static let input = rgb(0x10151E, light: 0xF3F6FA)
+    static let line = rgb(0x2B3646, light: 0xCBD6E2)
+    static let selected = rgb(0x20362F, light: 0xDDF2EB)
+    static let text = rgb(0xE9EEF5, light: 0x172433)
+    static let muted = rgb(0x9CAABC, light: 0x536477)
+    static let accent = rgb(0x77E8C9, light: 0x006B55)
+    static let blue = rgb(0x89B6FF, light: 0x245FA9)
+    static let amber = rgb(0xF3C677, light: 0x815500)
+    static let red = rgb(0xFF929D, light: 0xA52F41)
+    static let purple = rgb(0xC5ADFB, light: 0x6341A0)
     static let mono = Font.system(size: 12, design: .monospaced)
 
     static func method(_ method: HTTPMethod) -> Color {
@@ -37,12 +66,13 @@ enum Console {
         }
     }
 
-    private static func rgb(_ value: UInt32) -> Color {
-        Color(
-            red: Double((value >> 16) & 255) / 255,
-            green: Double((value >> 8) & 255) / 255,
-            blue: Double(value & 255) / 255
-        )
+    private static func rgb(_ dark: UInt32, light: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let value = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            return NSColor(srgbRed: CGFloat((value >> 16) & 255) / 255,
+                           green: CGFloat((value >> 8) & 255) / 255,
+                           blue: CGFloat(value & 255) / 255, alpha: 1)
+        })
     }
 }
 
