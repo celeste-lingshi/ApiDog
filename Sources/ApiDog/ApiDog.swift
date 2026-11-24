@@ -8,7 +8,7 @@ struct ApiDogApp: App {
                 .preferredColorScheme(.dark)
         }
         .defaultSize(width: 1200, height: 740)
-        .windowToolbarStyle(.unifiedCompact)
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }

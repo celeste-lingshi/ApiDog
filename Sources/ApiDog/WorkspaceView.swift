@@ -13,11 +13,12 @@ struct WorkspaceView: View {
     @State private var requestCancelled = false
     @State private var copiedTab: ResponseTab?
     @State private var historyQuery = ""
-    @State private var showEnvironments = false
-    @State private var showClearHistory = false
+    @State private var modal: Modal?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropdown: WorkspaceDropdown?
     @FocusState private var urlFocused: Bool
 
+    private enum Modal: Equatable { case environments, clearHistory }
     private enum RequestTab: String, CaseIterable { case headers = "请求头", body = "请求体" }
     private enum ResponseTab: String, CaseIterable { case body = "正文", headers = "响应头" }
 
@@ -26,10 +27,11 @@ struct WorkspaceView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            titleBar
             HStack(spacing: 0) {
                 sidebar
                     .frame(width: 244)
-                Rectangle().fill(Console.line).frame(width: 1)
+                ConsoleRule(vertical: true)
                 mainPane
             }
 
@@ -46,7 +48,8 @@ struct WorkspaceView: View {
         .foregroundStyle(Console.text)
         .background(Console.canvas)
         .tint(Console.accent)
-        .accessibilityHidden(dropdown != nil)
+        .disabled(modal != nil)
+        .accessibilityHidden(dropdown != nil || modal != nil)
         .overlayPreferenceValue(DropdownAnchors.self) { anchors in
             GeometryReader { geometry in
                 if let dropdown, let anchor = anchors[dropdown] {
@@ -65,45 +68,65 @@ struct WorkspaceView: View {
             }
         }
         .onAppear { urlFocused = true }
-        .sheet(isPresented: $showEnvironments) {
-            EnvironmentEditor(
-                environments: model.workspace.environments,
-                selected: model.workspace.selectedEnvironment?.id
-            ) { environments in
-                model.workspace.environments = environments
-                model.workspace.selectedEnvironmentID = model.workspace.selectedEnvironment?.id
-                model.save()
+        .overlay {
+            if let modal {
+                ConsoleModal {
+                    switch modal {
+                    case .environments:
+                        EnvironmentEditor(
+                            environments: model.workspace.environments,
+                            selected: model.workspace.selectedEnvironment?.id,
+                            cancel: closeModal
+                        ) { environments in
+                            model.workspace.environments = environments
+                            model.workspace.selectedEnvironmentID = model.workspace.selectedEnvironment?.id
+                            model.save()
+                            closeModal()
+                        }
+                    case .clearHistory:
+                        ClearHistoryDialog(cancel: closeModal) {
+                            model.workspace.history.removeAll()
+                            model.save()
+                            resetResponse()
+                            closeModal()
+                        }
+                    }
+                }
+                .onExitCommand(perform: closeModal)
+                .transition(.opacity)
             }
         }
-        .alert("清空全部请求历史？", isPresented: $showClearHistory) {
-            Button("取消", role: .cancel) {}
-            Button("清空历史", role: .destructive) {
-                model.workspace.history.removeAll()
-                model.save()
-                resetResponse()
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: modal)
+        .ignoresSafeArea(.container, edges: .top)
+    }
+
+    private var titleBar: some View {
+        ConsoleTitleBar {
+            environmentMenu
+            Button {
+                openModal(.environments)
+            } label: {
+                Label("变量", systemImage: "slider.horizontal.3")
             }
-        } message: {
-            Text("保存的环境变量会保留。")
+            .buttonStyle(ConsoleButton())
         }
+    }
+
+    private func openModal(_ target: Modal) {
+        dropdown = nil
+        urlFocused = false
+        modal = target
+    }
+
+    private func closeModal() {
+        modal = nil
+        urlFocused = true
     }
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(Console.sidebar)
-                    .frame(width: 32, height: 32)
-                    .background(Console.accent, in: RoundedRectangle(cornerRadius: 9))
-                    .accessibilityHidden(true)
-                Text("ApiDog")
-                    .font(.system(size: 21, weight: .semibold))
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 24)
-            .padding(.bottom, 22)
-
             Button {
+                dropdown = nil
                 draft = RequestDraft()
                 requestTab = .headers
                 resetResponse()
@@ -119,6 +142,7 @@ struct WorkspaceView: View {
             .keyboardShortcut("n", modifiers: .command)
             .disabled(isSending)
             .padding(.horizontal, 14)
+            .padding(.top, 16)
 
             HStack {
                 Text("请求历史")
@@ -201,19 +225,6 @@ struct WorkspaceView: View {
 
     private var mainPane: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Text("接口调试")
-                    .font(.system(size: 22, weight: .semibold))
-                Spacer()
-                environmentMenu
-                Button {
-                    showEnvironments = true
-                } label: {
-                    Label("变量", systemImage: "slider.horizontal.3")
-                }
-                .buttonStyle(ConsoleButton())
-            }
-
             addressBar
 
             GeometryReader { geometry in
@@ -269,7 +280,7 @@ struct WorkspaceView: View {
             }
         case .history:
             return [DropdownOption(title: "清空历史", icon: "trash", tone: Console.red) {
-                showClearHistory = true
+                openModal(.clearHistory)
             }]
         }
     }
@@ -282,7 +293,7 @@ struct WorkspaceView: View {
                     .foregroundStyle(Console.accent)
                 Text(name)
                     .lineLimit(1)
-                    .frame(maxWidth: 130)
+                    .frame(maxWidth: 130, alignment: .leading)
                 dropdownChevron(.environment)
             }
             .font(.system(size: 12, weight: .medium))
@@ -357,7 +368,7 @@ struct WorkspaceView: View {
             ConsoleTabs(tabs: RequestTab.allCases, selection: $requestTab) { $0.rawValue }
                 .padding(.horizontal, 12)
 
-            Divider()
+            ConsoleRule()
             if requestTab == .headers {
                 editor($draft.headers, label: "请求头", placeholder: "Content-Type: application/json")
             } else if draft.method.allowsBody {
@@ -443,7 +454,7 @@ struct WorkspaceView: View {
             .padding(.horizontal, 12)
             .onChange(of: responseTab) { _ in copiedTab = nil }
 
-            Divider()
+            ConsoleRule()
             responseContent
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -454,7 +465,7 @@ struct WorkspaceView: View {
     private var responseContent: some View {
         if isSending {
             VStack(spacing: 12) {
-                ProgressView().controlSize(.small)
+                ConsoleProgress()
                 Text("正在等待响应").foregroundStyle(Console.muted)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

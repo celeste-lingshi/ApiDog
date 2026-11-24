@@ -1,6 +1,7 @@
 import SwiftUI
 
 enum Console {
+    static let header = rgb(0x161C26)
     static let canvas = rgb(0x11151D)
     static let sidebar = rgb(0x0C1017)
     static let panel = rgb(0x171D27)
@@ -55,15 +56,17 @@ extension View {
 
 struct ConsoleButton: ButtonStyle {
     var prominent = false
+    var destructive = false
     @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+        let tone = destructive ? Console.red : Console.accent
+        return configuration.label
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(prominent ? Console.sidebar : Console.text)
             .padding(.horizontal, 12)
             .frame(minHeight: 32)
-            .consoleSurface(prominent ? Console.accent : Console.panel,
+            .consoleSurface(prominent ? tone : Console.panel,
                             border: prominent ? .clear : Console.line, radius: 7)
             .contentShape(RoundedRectangle(cornerRadius: 7))
             .opacity(isEnabled ? (configuration.isPressed ? 0.74 : 1) : 0.42)
@@ -94,6 +97,79 @@ struct ConsoleTabs<Tab: Hashable>: View {
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
+        }
+    }
+}
+
+struct ConsoleRule: View {
+    var vertical = false
+
+    var body: some View {
+        Rectangle().fill(Console.line)
+            .frame(width: vertical ? 1 : nil, height: vertical ? nil : 1)
+            .accessibilityHidden(true)
+    }
+}
+
+struct ConsoleCheckbox: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            ZStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(configuration.isOn ? Console.accent : Console.input)
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(configuration.isOn ? Console.accent : Console.muted, lineWidth: 1)
+                if configuration.isOn {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Console.sidebar)
+                }
+            }
+            .frame(width: 16, height: 16)
+            .frame(width: 36, height: 30)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityRepresentation {
+            Toggle(isOn: configuration.$isOn) { configuration.label }
+                .toggleStyle(.automatic)
+        }
+    }
+}
+
+struct ConsoleProgress: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(paused: reduceMotion)) { context in
+            let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1)
+            Circle().strokeBorder(Console.line, lineWidth: 2)
+                .overlay {
+                    Circle().trim(from: 0.02, to: 0.30)
+                        .stroke(Console.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .padding(1)
+                        .rotationEffect(.degrees(reduceMotion ? 0 : phase * 360))
+                }
+        }
+        .frame(width: 20, height: 20)
+        .accessibilityHidden(true)
+    }
+}
+
+struct ConsoleModal<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.62)
+                .accessibilityHidden(true)
+            content
+                .consoleSurface(Console.panel, radius: 13)
+                .clipShape(RoundedRectangle(cornerRadius: 13))
+                .shadow(color: .black.opacity(0.55), radius: 24, y: 12)
+                .accessibilityAddTraits(.isModal)
         }
     }
 }

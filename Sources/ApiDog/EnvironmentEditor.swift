@@ -1,33 +1,44 @@
 import SwiftUI
 
 struct EnvironmentEditor: View {
-    @Environment(\.dismiss) private var dismiss
     @State private var environments: [RequestEnvironment]
     @State private var selectedID: UUID?
     @FocusState private var nameFocused: Bool
+    let cancel: () -> Void
     let save: ([RequestEnvironment]) -> Void
 
     init(
         environments: [RequestEnvironment],
         selected: UUID?,
+        cancel: @escaping () -> Void,
         save: @escaping ([RequestEnvironment]) -> Void
     ) {
         _environments = State(initialValue: environments)
         _selectedID = State(initialValue: selected ?? environments.first?.id)
+        self.cancel = cancel
         self.save = save
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Label("环境变量", systemImage: "slider.horizontal.3")
-                .font(.system(size: 18, weight: .semibold))
-                .padding(18)
+            HStack(spacing: 10) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Console.accent)
+                    .frame(width: 34, height: 34)
+                    .consoleSurface(Console.accent.opacity(0.10), border: Console.accent.opacity(0.24), radius: 8)
+                    .accessibilityHidden(true)
+                Text("环境变量")
+                    .font(.system(size: 17, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+            }
+            .padding(16)
 
-            Divider()
+            ConsoleRule()
             HStack(spacing: 0) {
                 environmentList
                     .frame(width: 154)
-                Divider()
+                ConsoleRule(vertical: true)
                 if let index = environments.firstIndex(where: { $0.id == selectedID }) {
                     environmentForm(index)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -35,7 +46,7 @@ struct EnvironmentEditor: View {
             }
             .frame(height: 302)
 
-            Divider()
+            ConsoleRule()
             HStack(spacing: 8) {
                 if !environments.allSatisfy(\.isValid) {
                     Text("请补齐环境名称，并检查变量名是否有效、是否重复。")
@@ -43,12 +54,11 @@ struct EnvironmentEditor: View {
                         .foregroundStyle(Console.amber)
                 }
                 Spacer()
-                Button("取消") { dismiss() }
+                Button("取消", action: cancel)
                     .buttonStyle(ConsoleButton())
                     .keyboardShortcut(.cancelAction)
                 Button("保存") {
                     save(environments)
-                    dismiss()
                 }
                 .buttonStyle(ConsoleButton(prominent: true))
                 .keyboardShortcut(.defaultAction)
@@ -58,8 +68,9 @@ struct EnvironmentEditor: View {
         }
         .frame(width: 680)
         .foregroundStyle(Console.text)
-        .background(Console.canvas)
+        .background(Console.panel)
         .tint(Console.accent)
+        .onAppear { nameFocused = true }
     }
 
     private var environmentList: some View {
@@ -152,8 +163,9 @@ struct EnvironmentEditor: View {
                                     input(TextField("变量值", text: $variable.value))
                                 }
                                 Toggle("仅本次运行", isOn: $variable.sessionOnly)
-                                    .toggleStyle(.checkbox)
+                                    .toggleStyle(ConsoleCheckbox())
                                     .labelsHidden()
+                                    .accessibilityLabel("仅本次运行")
                                     .frame(width: 76)
                                     .help("值在退出后清空，变量名会保留。")
                                 Button {
