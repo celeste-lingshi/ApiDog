@@ -12,6 +12,7 @@ struct RequestDirectoryView: View {
     let directory: RequestDirectory
     let selectedID: UUID?
     @Binding var collapsed: Set<UUID>
+    let canEdit: Bool
     let select: (SavedRequest) -> Void
     let duplicate: (SavedRequest) -> Void
     let remove: (SavedRequest) -> Void
@@ -115,10 +116,11 @@ struct RequestDirectoryView: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 6, coordinateSpace: .named(Self.coordinateSpace))
                     .updating($drag) { value, state, _ in
+                        guard canEdit else { return }
                         state = Drag(requestID: request.id, location: value.location)
                     }
                     .onEnded { value in
-                        if let destination = target(at: value.location, within: bounds) {
+                        if canEdit, let destination = target(at: value.location, within: bounds) {
                             _ = move(request.id, destination.key)
                         }
                     }
@@ -136,6 +138,7 @@ struct RequestDirectoryView: View {
             .buttonStyle(.plain)
             .help("复制请求")
             .accessibilityLabel("复制请求「\(request.name)」")
+            .disabled(!canEdit)
 
             Button {
                 remove(request)
@@ -149,6 +152,7 @@ struct RequestDirectoryView: View {
             .buttonStyle(.plain)
             .help("删除请求")
             .accessibilityLabel("删除请求「\(request.name)」")
+            .disabled(!canEdit)
         }
         .consoleSurface(selected ? Console.selected : .clear,
                         border: selected ? Console.accent.opacity(0.26) : .clear, radius: 6)

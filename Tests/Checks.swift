@@ -8,6 +8,7 @@ struct Checks {
         try checkRequest()
         try checkWorkspace()
         try checkRequestDirectory()
+        try checkCredentialMigration()
         try checkCurl()
         try checkSignedCurlRecipe()
         try checkGeneratedAuthentication()
@@ -197,6 +198,46 @@ struct Checks {
             _ = try wrongKey.load()
             preconditionFailure("用错误的密钥打开了认证信息")
         } catch CryptoKitError.authenticationFailure {}
+    }
+
+    static func checkCredentialMigration() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let workspaceFile = folder.appendingPathComponent("workspace.json")
+        let keyFile = folder.appendingPathComponent("workspace.key")
+        let oldKey = SymmetricKey(size: .bits256)
+        let legacy = WorkspaceStorage(file: workspaceFile, credentialKey: { _ in oldKey })
+        var workspace = Workspace()
+        let draft = RequestDraft(url: "https://example.com/ping",
+                                 auth: RequestAuthentication(mode: .apiKey, name: "X-API-Key", secret: "test-only-key"))
+        workspace.requestDirectory.store(SavedRequest(name: "旧请求", categoryID: nil, draft: draft))
+        try legacy.save(workspace)
+        let before = try Data(contentsOf: workspaceFile)
+        let local = WorkspaceStorage(file: workspaceFile)
+        let locked = try local.load()
+        precondition(locked.credentialsLocked && locked.requestDirectory.requests.first?.name == "旧请求")
+        do {
+            try local.save(locked)
+            preconditionFailure("旧版凭证还未迁移，工作区应为只读")
+        } catch {}
+        do {
+            _ = try local.migrateCredentials(using: SymmetricKey(size: .bits256))
+            preconditionFailure("迁移错钥匙应失败")
+        } catch CryptoKitError.authenticationFailure {}
+        precondition(!FileManager.default.fileExists(atPath: keyFile.path))
+
+        let migrated = try local.migrateCredentials(using: oldKey)
+        let after = try Data(contentsOf: workspaceFile)
+        precondition(migrated == workspace && before == after)
+        let reopened = try WorkspaceStorage(file: workspaceFile).load()
+        precondition(reopened == workspace)
+        let info = try FileManager.default.attributesOfItem(atPath: keyFile.path)
+        precondition(info[.posixPermissions] as? Int == 0o600)
+
+        let freshFile = folder.appendingPathComponent("fresh.json")
+        try WorkspaceStorage(file: freshFile).save(workspace)
+        let fresh = try WorkspaceStorage(file: freshFile).load()
+        precondition(fresh == workspace)
     }
 
     static func checkCurl() throws {

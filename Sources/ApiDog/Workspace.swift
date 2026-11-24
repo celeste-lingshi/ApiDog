@@ -82,6 +82,8 @@ struct Workspace: Codable, Equatable {
 
     init() {}
 
+    var credentialsLocked: Bool { encryptedCredentials != nil }
+
     var requestDirectory: RequestDirectory {
         get { directory ?? RequestDirectory() }
         set { directory = newValue }
@@ -114,51 +116,101 @@ struct Workspace: Codable, Equatable {
 
 final class WorkspaceStorage {
     let file: URL
-    private let credentialKey: (Bool) throws -> SymmetricKey
+    private let credentialKey: ((Bool) throws -> SymmetricKey)?
     private var cachedKey: SymmetricKey?
+    private var keyFile: URL { file.deletingPathExtension().appendingPathExtension("key") }
 
     static let local = WorkspaceStorage(file: URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Application Support/ApiDog/workspace.json"))
 
-    init(file: URL, credentialKey: @escaping (Bool) throws -> SymmetricKey = WorkspaceCredentialKey.load) {
+    init(file: URL, credentialKey: ((Bool) throws -> SymmetricKey)? = nil) {
         self.file = file
         self.credentialKey = credentialKey
     }
 
     private func key(create: Bool) throws -> SymmetricKey {
         if let cachedKey { return cachedKey }
-        let key = try credentialKey(create)
+        let key = try credentialKey?(create) ?? loadFileKey(create: create)
         cachedKey = key
         return key
     }
 
     func load() throws -> Workspace {
+        var workspace = try readWorkspace()
+        guard workspace.credentialsLocked else { return workspace }
+        do {
+            try restoreCredentials(in: &workspace, using: key(create: false))
+        } catch KeyFileError.missing {
+            return workspace
+        }
+        return workspace
+    }
+
+    func migrateCredentials(using key: SymmetricKey) throws -> Workspace {
+        var workspace = try readWorkspace()
+        try restoreCredentials(in: &workspace, using: key)
+        try writeFileKey(key)
+        cachedKey = key
+        return workspace
+    }
+
+    private func readWorkspace() throws -> Workspace {
         do {
             let data = try Data(contentsOf: file)
-            var workspace = try JSONDecoder().decode(Workspace.self, from: data)
-            if let encrypted = workspace.encryptedCredentials {
-                let key = try key(create: false)
-                let sealed = try AES.GCM.SealedBox(combined: encrypted)
-                let decoded = try AES.GCM.open(sealed, using: key)
-                let credentials = try JSONDecoder().decode([UUID: RequestCredentials].self, from: decoded)
-                if var directory = workspace.directory {
-                    for index in directory.requests.indices {
-                        if let credential = credentials[directory.requests[index].id] {
-                            directory.requests[index].draft.auth = credential.authentication
-                            directory.requests[index].draft.variables.merge(credential.variables) { _, saved in saved }
-                        }
-                    }
-                    workspace.directory = directory
-                }
-                workspace.encryptedCredentials = nil
-            }
-            return workspace
+            return try JSONDecoder().decode(Workspace.self, from: data)
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             return Workspace()
         }
     }
 
+    private func restoreCredentials(in workspace: inout Workspace, using key: SymmetricKey) throws {
+        guard let encrypted = workspace.encryptedCredentials else { return }
+        let sealed = try AES.GCM.SealedBox(combined: encrypted)
+        let decoded = try AES.GCM.open(sealed, using: key)
+        let credentials = try JSONDecoder().decode([UUID: RequestCredentials].self, from: decoded)
+        if var directory = workspace.directory {
+            for index in directory.requests.indices {
+                if let credential = credentials[directory.requests[index].id] {
+                    directory.requests[index].draft.auth = credential.authentication
+                    directory.requests[index].draft.variables.merge(credential.variables) { _, saved in saved }
+                }
+            }
+            workspace.directory = directory
+        }
+        workspace.encryptedCredentials = nil
+    }
+
+    private func loadFileKey(create: Bool) throws -> SymmetricKey {
+        do {
+            let data = try Data(contentsOf: keyFile)
+            guard data.count == 32 else { throw KeyFileError.invalid }
+            return SymmetricKey(data: data)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            guard create else { throw KeyFileError.missing }
+            let key = SymmetricKey(size: .bits256)
+            try writeFileKey(key)
+            return key
+        }
+    }
+
+    private func writeFileKey(_ key: SymmetricKey) throws {
+        try createFolder()
+        let files = FileManager.default
+        let temporary = keyFile.deletingLastPathComponent().appendingPathComponent(".workspace-key-\(UUID())")
+        guard files.createFile(atPath: temporary.path, contents: key.withUnsafeBytes { Data($0) },
+                               attributes: [.posixPermissions: 0o600]) else { throw KeyFileError.write }
+        defer { try? files.removeItem(at: temporary) }
+        try files.linkItem(at: temporary, to: keyFile)
+    }
+
+    private func createFolder() throws {
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+    }
+
     func save(_ workspace: Workspace) throws {
+        guard !workspace.credentialsLocked else { throw KeyFileError.missing }
         var persisted = workspace
         for environment in persisted.environments.indices {
             for variable in persisted.environments[environment].variables.indices
@@ -190,12 +242,20 @@ final class WorkspaceStorage {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(persisted)
-        try FileManager.default.createDirectory(
-            at: file.deletingLastPathComponent(),
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
+        try createFolder()
         try data.write(to: file, options: .atomic)
+    }
+
+    private enum KeyFileError: LocalizedError {
+        case missing, invalid, write
+
+        var errorDescription: String? {
+            switch self {
+            case .missing: return "旧版认证尚未迁移，无法写入工作区。"
+            case .invalid: return "工作区的本地密钥文件格式不正确。"
+            case .write: return "无法保存工作区的本地密钥文件。"
+            }
+        }
     }
 }
 
@@ -205,25 +265,18 @@ private struct RequestCredentials: Codable {
 }
 
 enum WorkspaceCredentialKey {
-    static func load(create: Bool) throws -> SymmetricKey {
+    static func loadLegacy() throws -> SymmetricKey {
         let item: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "com.celeste-lingshi.apidog.workspace",
-            kSecAttrAccount as String: "工作区加密密钥"
+            kSecAttrAccount as String: "工作区加密密钥",
+            kSecReturnData as String: true
         ]
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(item.merging([kSecReturnData as String: true]) { _, new in new } as CFDictionary, &result)
-        if status == errSecSuccess {
-            guard let data = result as? Data, data.count == 32 else { throw KeychainError.invalidKey }
-            return SymmetricKey(data: data)
-        }
-        guard status == errSecItemNotFound, create else { throw KeychainError.access(status) }
-        let key = SymmetricKey(size: .bits256)
-        var newItem = item
-        newItem[kSecValueData as String] = key.withUnsafeBytes { Data($0) }
-        let added = SecItemAdd(newItem as CFDictionary, nil)
-        guard added == errSecSuccess else { throw KeychainError.access(added) }
-        return key
+        let status = SecItemCopyMatching(item as CFDictionary, &result)
+        guard status == errSecSuccess else { throw KeychainError.access(status) }
+        guard let data = result as? Data, data.count == 32 else { throw KeychainError.invalidKey }
+        return SymmetricKey(data: data)
     }
 
     private enum KeychainError: LocalizedError {

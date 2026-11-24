@@ -63,15 +63,30 @@ struct WorkspaceView: View {
                     .frame(width: 244)
                 ConsoleRule(vertical: true)
                 mainPane
+                    .disabled(model.workspace.credentialsLocked)
             }
 
             if let issue = model.storageIssue {
-                Label(issue, systemImage: "externaldrive.badge.exclamationmark")
-                    .font(.callout)
-                    .foregroundStyle(Console.amber)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(Console.panel)
+                HStack(spacing: 12) {
+                    Label(issue, systemImage: "externaldrive.badge.exclamationmark")
+                        .font(.callout)
+                        .foregroundStyle(Console.amber)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if model.workspace.credentialsLocked {
+                        Button(model.isMigratingCredentials ? "等待钥匙串授权" : "迁移认证") {
+                            Task {
+                                await model.migrateCredentials()
+                                if !model.workspace.credentialsLocked, let saved = activeSavedRequest {
+                                    draft = saved.draft
+                                }
+                            }
+                        }
+                        .buttonStyle(ConsoleButton())
+                        .disabled(model.isMigratingCredentials)
+                    }
+                }
+                .padding(12)
+                .background(Console.panel)
             }
         }
         .frame(minWidth: 820, minHeight: 610)
@@ -202,7 +217,7 @@ struct WorkspaceView: View {
                 Label("导入 cURL", systemImage: "square.and.arrow.down")
             }
             .buttonStyle(ConsoleButton())
-            .disabled(isSending)
+            .disabled(isSending || model.workspace.credentialsLocked)
         }
     }
 
@@ -258,7 +273,8 @@ struct WorkspaceView: View {
     }
 
     private func moveRequest(_ id: UUID, to categoryID: UUID?) -> Bool {
-        guard !isSending, modal == nil, model.workspace.requestDirectory.move(id, to: categoryID) else { return false }
+        guard !isSending, modal == nil, !model.workspace.credentialsLocked,
+              model.workspace.requestDirectory.move(id, to: categoryID) else { return false }
         if let categoryID { collapsedCategories.remove(categoryID) }
         model.save()
         return true
@@ -279,9 +295,10 @@ struct WorkspaceView: View {
                 Spacer(minLength: 0)
                 if sidebarTab == .directory {
                     sidebarAction(.directory, label: "添加到请求目录", symbol: "plus")
-                        .disabled(isSending)
+                        .disabled(isSending || model.workspace.credentialsLocked)
                 } else {
                     sidebarAction(.history, label: "历史操作", symbol: "ellipsis")
+                        .disabled(model.workspace.credentialsLocked)
                 }
             }
             .padding(.horizontal, 14)
@@ -292,7 +309,7 @@ struct WorkspaceView: View {
                 .padding(.bottom, 8)
             if sidebarTab == .directory {
                 RequestDirectoryView(directory: directory, selectedID: activeSavedID, collapsed: $collapsedCategories,
-                                     select: openSavedRequest) { request in
+                                     canEdit: !model.workspace.credentialsLocked, select: openSavedRequest) { request in
                     var source = request
                     if source.id == activeSavedID { source.draft = draft }
                     openModal(.duplicateRequest(source))
