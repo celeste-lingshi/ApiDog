@@ -7,10 +7,11 @@ struct Checks {
         try checkRequest()
         try checkWorkspace()
         try checkCurl()
+        try checkSignedCurlRecipe()
         try checkGeneratedAuthentication()
         try await checkResponse()
         try await checkCancellation()
-        print("通过：请求内变量和认证、旧历史读取、凭证落盘、签名、脚本认证、cURL 导入导出、响应处理、请求取消")
+        print("通过：请求内变量和认证、旧历史读取、凭证落盘、签名、脚本认证、cURL 导入导出、签名命令导入与响应提取、响应处理、请求取消")
     }
 
     static func checkRequest() throws {
@@ -141,6 +142,70 @@ struct Checks {
             do {
                 _ = try CurlCommand.parse(invalid)
                 preconditionFailure("错误地导入了命令")
+            } catch {}
+        }
+    }
+
+    static func checkSignedCurlRecipe() throws {
+        let source = #"""
+        api_host=demo.example.test
+          api_path=/api/v1/list
+          api_ts=$(date +%s)
+          api_sign=$(printf '%s' "${LIST_API_KEY}_${LIST_SECRET}_${api_path}_${api_ts}" |
+            openssl dgst -sha256 -hmac "$LIST_SECRET" -binary |
+            openssl base64 -A | tr '/+' '_-' | tr -d '=')
+
+          curl -fsS --noproxy "$api_host" --resolve "$api_host:8009:127.0.0.1" \
+            --get "http://$api_host:8009$api_path" \
+            --data-urlencode 'value=a+b' \
+            --data-urlencode "key=$LIST_API_KEY" \
+            --data-urlencode "timestamp=$api_ts" \
+            --data-urlencode "sign=$api_sign" |
+            jq -r '.reason[]?.port'
+        """#
+        var parsed = try CurlCommand.parse(source)
+        precondition(parsed.url == "http://demo.example.test:8009/api/v1/list")
+        precondition(parsed.method == .get && parsed.query.count == 1)
+        precondition(parsed.query[0].name == "value" && parsed.query[0].value == "a+b")
+        precondition(parsed.auth.mode == .hmac && parsed.auth.keyField == "key")
+        precondition(parsed.auth.signingKeyInput == "LIST_API_KEY" && parsed.auth.signingSecretInput == "LIST_SECRET")
+        precondition(parsed.auth.name.isEmpty && parsed.auth.secret == nil)
+        precondition(parsed.auth.signingURI == nil)
+        precondition(parsed.route == RequestRoute(resolve: "demo.example.test:8009:127.0.0.1", noProxy: "demo.example.test"))
+        precondition(parsed.projection == ".reason[]?.port")
+        let format = try ResponseProjection(parsed.projection!)
+        let ports = try format.format(#"{"reason":[{"port":80},{"port":"443"}]}"#)
+        let noPorts = try format.format(#"{"reason":null}"#)
+        precondition(ports == "80\n443" && noPorts.isEmpty)
+
+        parsed.auth.name = "demo-key"
+        parsed.auth.secret = "demo-secret"
+        let fixed = Date(timeIntervalSince1970: 1_700_000_000)
+        let request = try parsed.makeRequest(at: fixed)
+        let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        precondition(query.contains(URLQueryItem(name: "key", value: "demo-key")))
+        precondition(query.contains(URLQueryItem(name: "timestamp", value: "1700000000")))
+        precondition(query.filter { $0.name == "sign" && $0.value?.count == 43 }.count == 1)
+        let exported = CurlCommand.render(request, followsRedirects: false, route: parsed.route, projection: parsed.projection)
+        precondition(exported.contains("--resolve 'demo.example.test:8009:127.0.0.1'"))
+        precondition(exported.contains("--noproxy 'demo.example.test'"))
+        precondition(exported.hasSuffix("jq -r '.reason[]?.port'"))
+        let roundTrip = try CurlCommand.parse(exported)
+        let replayed = try roundTrip.makeRequest()
+        precondition(replayed.url == request.url && roundTrip.route == parsed.route)
+        precondition(roundTrip.projection == parsed.projection)
+
+        for invalid in [
+            source.replacingOccurrences(of: "date +%s", with: "date +%N"),
+            source.replacingOccurrences(of: "$api_sign", with: "$LIST_SECRET"),
+            source.replacingOccurrences(of: "127.0.0.1", with: "invalid-address"),
+            source.replacingOccurrences(of: ".reason[]?.port", with: ".reason | length"),
+            source.replacingOccurrences(of: "sign=$api_sign", with: "sign=prefix$api_sign"),
+            "curl --resolve 'other.example.test:80:127.0.0.1' http://demo.example.test",
+        ] {
+            do {
+                _ = try CurlCommand.parse(invalid)
+                preconditionFailure("接受了不支持的命令")
             } catch {}
         }
     }

@@ -1,29 +1,58 @@
 import Foundation
 
 enum CurlCommand {
-    static func render(_ request: URLRequest, followsRedirects: Bool) -> String {
-        var parts = ["curl --globoff"]
-        if followsRedirects { parts.append("--location") }
-        if request.httpMethod == HTTPMethod.head.rawValue {
-            parts.append("--head")
-        } else if let method = request.httpMethod, !(method == "POST" && request.httpBody != nil) {
-            parts.append("--request " + quote(method))
+    static func render(_ request: URLRequest, followsRedirects: Bool, route: RequestRoute? = nil,
+                       projection: String? = nil) -> String {
+        var options = requestOptions(request, followsRedirects: followsRedirects, route: route)
+        if projection != nil { options.insert(contentsOf: [["--silent"], ["--show-error"]], at: 1) }
+        let lines = options.map { option in
+            ([option[0]] + option.dropFirst().map(quote)).joined(separator: " ")
         }
-        if let address = request.url?.absoluteString { parts.append("--url " + quote(address)) }
+        let command = (["curl " + lines[0]] + lines.dropFirst()).joined(separator: " \\\n  ")
+        if let projection { return command + " |\n  jq -r " + quote(projection) }
+        return command
+    }
+
+    static func requestOptions(_ request: URLRequest, followsRedirects: Bool, route: RequestRoute?) -> [[String]] {
+        var parts = [["--globoff"]]
+        if followsRedirects { parts.append(["--location"]) }
+        if let resolve = route?.resolve { parts.append(["--resolve", resolve]) }
+        if let noProxy = route?.noProxy { parts.append(["--noproxy", noProxy]) }
+        if request.httpMethod == HTTPMethod.head.rawValue {
+            parts.append(["--head"])
+        } else if let method = request.httpMethod, !(method == "POST" && request.httpBody != nil) {
+            parts.append(["--request", method])
+        }
+        if let address = request.url?.absoluteString { parts.append(["--url", address]) }
         for (name, value) in (request.allHTTPHeaderFields ?? [:]).sorted(by: { $0.key < $1.key }) {
             let field = value.isEmpty ? name + ";" : name + ": " + value
-            parts.append("--header " + quote(field))
+            parts.append(["--header", field])
         }
         if let body = request.httpBody {
-            parts.append("--data-raw " + quote(String(decoding: body, as: UTF8.self)))
+            parts.append(["--data-raw", String(decoding: body, as: UTF8.self)])
         }
-        return parts.joined(separator: " \\\n  ")
+        return parts
     }
 
     static func parse(_ text: String) throws -> RequestDraft {
-        let arguments = try tokenize(text)
+        let source = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if source.range(of: #"\A[A-Za-z_][A-Za-z0-9_]*="#, options: .regularExpression) != nil {
+            return try SignedCurlRecipe.parse(source)
+        }
+        return try parseCommand(source)
+    }
+
+    static func parseCommand(_ text: String, substitutions: [String: String]? = nil) throws -> RequestDraft {
+        let (arguments, pipeline) = try tokenize(text, substitutions: substitutions, allowingPipe: true)
         guard arguments.first == "curl" else { throw CurlError.missingCommand }
         var draft = RequestDraft()
+        if let pipeline {
+            guard pipeline.count == 3, pipeline[0] == "jq",
+                  ["-r", "--raw-output"].contains(pipeline[1]) else { throw CurlError.unsupportedPipeline }
+            _ = try ResponseProjection(pipeline[2])
+            draft.projection = pipeline[2]
+        }
+        var route = RequestRoute()
         var method: HTTPMethod?
         var url: String?
         var data: [String] = []
@@ -120,7 +149,11 @@ enum CurlCommand {
             case "-I", "--head": head = true
             case "-G", "--get": get = true
             case "-L", "--location": draft.followsRedirects = true
-            case "-g", "--globoff", "--compressed", "--basic", "-s", "-S", "-sS", "--silent", "--show-error":
+            case "--resolve":
+                guard route.resolve == nil else { throw RouteError.invalidResolve }
+                route.resolve = try value()
+            case "--noproxy": route.noProxy = try value()
+            case "-g", "--globoff", "--compressed", "--basic", "-s", "-S", "-sS", "-fsS", "-f", "--fail", "--silent", "--show-error":
                 break
             default:
                 throw CurlError.unsupported(option)
@@ -176,6 +209,7 @@ enum CurlCommand {
                 draft.headers.remove(at: position)
             }
         }
+        if route.isConfigured { draft.route = route }
         do {
             _ = try draft.makeRequest()
         } catch RequestError.missingVariable {
@@ -204,13 +238,38 @@ enum CurlCommand {
 
     private enum Quoting { case plain, single, double, ansi }
 
-    private static func tokenize(_ text: String) throws -> [String] {
+    static func tokenize(_ text: String, substitutions: [String: String]? = nil, allowingPipe: Bool = false)
+        throws -> ([String], [String]?) {
         var mode = Quoting.plain
         var words: [String] = []
+        var beforePipe: [String]?
         var word = ""
         var started = false
-        var input = text.makeIterator()
-        while let c = input.next() {
+        var cursor = text.startIndex
+
+        func next() -> Character? {
+            guard cursor != text.endIndex else { return nil }
+            let character = text[cursor]
+            text.formIndex(after: &cursor)
+            return character
+        }
+
+        func variable() throws -> String {
+            guard let substitutions, cursor != text.endIndex else { throw CurlError.shellExpression }
+            let braced = text[cursor] == "{"
+            if braced { text.formIndex(after: &cursor) }
+            let start = cursor
+            while cursor != text.endIndex, text[cursor].isASCII,
+                  text[cursor].isLetter || text[cursor].isNumber || text[cursor] == "_" {
+                text.formIndex(after: &cursor)
+            }
+            let name = String(text[start..<cursor])
+            if braced, next() != "}" { throw CurlError.shellExpression }
+            guard let value = substitutions[name] else { throw CurlError.unknownVariable(name) }
+            return value
+        }
+
+        while let c = next() {
             if mode == .single {
                 if c == "'" { mode = .plain } else { word.append(c) }
                 continue
@@ -218,7 +277,7 @@ enum CurlCommand {
             if mode == .ansi {
                 if c == "'" { mode = .plain; continue }
                 if c != "\\" { word.append(c); continue }
-                guard let next = input.next() else { throw CurlError.invalidQuoting }
+                guard let next = next() else { throw CurlError.invalidQuoting }
                 switch next {
                 case "n": word.append("\n")
                 case "r": word.append("\r")
@@ -229,7 +288,7 @@ enum CurlCommand {
                 continue
             }
             if c == "\\" {
-                guard let escaped = input.next() else { throw CurlError.invalidQuoting }
+                guard let escaped = next() else { throw CurlError.invalidQuoting }
                 if escaped.isNewline { continue }
                 if mode == .double && !"\"\\$".contains(escaped) { word.append("\\") }
                 word.append(escaped)
@@ -238,7 +297,8 @@ enum CurlCommand {
             }
             if mode == .double {
                 if c == "\"" { mode = .plain }
-                else if c == "$" || c == "\u{60}" { throw CurlError.shellExpression }
+                else if c == "$" { word += try variable() }
+                else if c == "\u{60}" { throw CurlError.shellExpression }
                 else { word.append(c) }
                 continue
             }
@@ -246,12 +306,19 @@ enum CurlCommand {
                 if started { words.append(word); word = ""; started = false }
                 continue
             }
+            if c == "|", allowingPipe {
+                guard beforePipe == nil else { throw CurlError.unsupportedPipeline }
+                if started { words.append(word); word = ""; started = false }
+                beforePipe = words
+                words = []
+                continue
+            }
             started = true
             switch c {
             case "'": mode = .single
             case "\"": mode = .double
             case "$":
-                guard input.next() == "'" else { throw CurlError.shellExpression }
+                guard next() == "'" else { throw CurlError.shellExpression }
                 mode = .ansi
             case "\u{60}", ";", "|", "&", ">", "<", "(", ")": throw CurlError.shellExpression
             default: word.append(c)
@@ -259,14 +326,14 @@ enum CurlCommand {
         }
         guard mode == .plain else { throw CurlError.invalidQuoting }
         if started { words.append(word) }
-        return words
+        return beforePipe.map { ($0, words) } ?? (words, nil)
     }
 }
 
-private enum CurlError: LocalizedError {
+enum CurlError: LocalizedError {
     case missingCommand, multipleURLs, invalidURL, invalidQuoting, shellExpression, fileReference
     case unsupported(String), missingValue(String), unsupportedMethod(String), invalidHeader, invalidCredentials
-    case unsupportedBody, invalidQuery
+    case unsupportedBody, invalidQuery, unsupportedPipeline, unknownVariable(String)
 
     var errorDescription: String? {
         switch self {
@@ -282,6 +349,8 @@ private enum CurlError: LocalizedError {
         case .invalidHeader: return "请检查 cURL 的请求头。目前支持带值的请求头和末尾为分号的空请求头。"
         case .invalidCredentials: return "请使用明确的一种认证方式，Basic 需要用户名和密码。"
         case .unsupportedBody: return "请求方法和正文选项不兼容，GET 或 HEAD 无法携带正文。"
+        case .unsupportedPipeline: return "响应管道支持 jq -r 和简单字段路径，例如 .reason[]?.port。"
+        case .unknownVariable(let name): return "无法静态展开 Shell 变量「\(name)」。"
         case .invalidQuery: return "请先对 cURL 的查询字符串做 URL 编码，或使用 --data-urlencode。"
         }
     }

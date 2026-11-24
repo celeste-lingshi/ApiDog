@@ -12,7 +12,7 @@ struct CurlImportDialog: View {
             Label("导入 cURL", systemImage: "terminal")
                 .font(.system(size: 17, weight: .semibold))
                 .accessibilityAddTraits(.isHeader)
-            Text("粘贴一条 cURL 命令，导入后会替换当前请求。")
+            Text("粘贴 cURL 命令或带变量、OpenSSL 签名和 jq 提取的命令。导入后会替换当前请求。")
                 .font(.system(size: 12))
                 .foregroundStyle(Console.muted)
 

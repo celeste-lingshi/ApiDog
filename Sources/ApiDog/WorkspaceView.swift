@@ -10,6 +10,7 @@ struct WorkspaceView: View {
     @State private var generatedPreview: AuthPreview?
     @State private var copyingGeneratedCurl = false
     @State private var result: ResponseDetails?
+    @State private var resultProjection: String?
     @State private var error: String?
     @State private var activeHistory: HistoryEntry?
     @State private var requestTask: Task<Void, Never>?
@@ -28,9 +29,14 @@ struct WorkspaceView: View {
 
     private enum Modal: Equatable { case importCurl, clearHistory }
     private enum RequestTab: String, CaseIterable {
-        case variables = "变量", query = "查询", headers = "请求头", authentication = "认证", body = "请求体"
+        case variables = "变量", query = "查询", headers = "请求头", authentication = "认证"
+        case body = "请求体", connection = "连接"
     }
-    private enum ResponseTab: String, CaseIterable { case curl = "cURL", body = "正文", headers = "响应头" }
+    private enum ResponseTab: String, CaseIterable { case curl = "cURL", body = "正文", headers = "响应头", extracted = "提取" }
+
+    private var availableResponseTabs: [ResponseTab] {
+        ResponseTab.allCases.filter { $0 != .extracted || resultProjection != nil }
+    }
 
     private var isSending: Bool { requestTask != nil }
     private var hasAddress: Bool { !draft.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -403,6 +409,8 @@ struct WorkspaceView: View {
                 RequestFieldsEditor(fields: $draft.headers, header: true)
             case .authentication:
                 authenticationEditor
+            case .connection:
+                connectionEditor
             case .body:
                 if draft.method.allowsBody {
                     editor(Binding(
@@ -421,6 +429,44 @@ struct WorkspaceView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .consoleSurface()
         .disabled(isSending)
+    }
+
+    private var connectionEditor: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                authRow("指定解析") {
+                    TextField("域名:端口:IP", text: routeValue(\.resolve)).requestInput()
+                }
+                authRow("不走代理") {
+                    TextField("主机名，多个用逗号分隔", text: routeValue(\.noProxy)).requestInput()
+                }
+                authRow("响应提取") {
+                    TextField(".reason[]?.port", text: Binding(
+                        get: { draft.projection ?? "" },
+                        set: {
+                            let value = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                            draft.projection = value.isEmpty ? nil : value
+                        }
+                    )).requestInput()
+                }
+                Text("响应提取使用简单字段路径。原始内容仍在「正文」。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Console.muted)
+            }
+            .padding(12)
+        }
+    }
+
+    private func routeValue(_ path: WritableKeyPath<RequestRoute, String?>) -> Binding<String> {
+        Binding(
+            get: { draft.route?[keyPath: path] ?? "" },
+            set: {
+                let value = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                var route = draft.route ?? RequestRoute()
+                route[keyPath: path] = value.isEmpty ? nil : value
+                draft.route = route.isConfigured ? route : nil
+            }
+        )
     }
 
     private var authenticationEditor: some View {
@@ -454,8 +500,18 @@ struct WorkspaceView: View {
                     authRow("值") { SecureField("填 API Key", text: authenticationSecret).requestInput() }
                     authRow("位置") { authLocation }
                 case .hmac:
-                    authRow("API Key") { TextField("填 apikey", text: $draft.auth.name).requestInput() }
-                    authRow("Secure Key") { SecureField("填 securekey", text: authenticationSecret).requestInput() }
+                    authRow("API Key") {
+                        TextField(draft.auth.signingKeyInput ?? "填 apikey", text: $draft.auth.name).requestInput()
+                    }
+                    authRow("Secure Key") {
+                        SecureField(draft.auth.signingSecretInput ?? "填 securekey", text: authenticationSecret).requestInput()
+                    }
+                    authRow("Key 字段") {
+                        TextField("apikey", text: Binding(
+                            get: { draft.auth.signingKeyField ?? "" },
+                            set: { draft.auth.signingKeyField = $0 }
+                        )).requestInput()
+                    }
                     authRow("签名 URI") {
                         TextField("默认使用请求路径", text: Binding(
                             get: { draft.auth.signingURI ?? "" },
@@ -463,7 +519,7 @@ struct WorkspaceView: View {
                         )).requestInput()
                     }
                     authRow("位置") { authLocation }
-                    Text("apikey 和 sign 使用所选位置。timestamp 自动填入 URL 查询。")
+                    Text("Key 和 sign 使用所选位置。timestamp 自动填入 URL 查询。")
                         .font(.system(size: 11))
                         .foregroundStyle(Console.muted)
                 case .script:
@@ -529,10 +585,12 @@ struct WorkspaceView: View {
             prepared = generatedPreview?.draft == draft ? generatedPreview?.command : nil
         } else {
             prepared = Result {
-                CurlCommand.render(try draft.makeRequest(), followsRedirects: draft.followsRedirects)
+                formattedCommand(try draft.makeRequest(), for: draft)
             }
         }
         let command = try? prepared?.get()
+        let payload = result.map(responsePayload)
+        let visibleText = try? payload?.get()
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 panelTitle(responseTab == .curl ? "cURL 预览" : "响应",
@@ -555,7 +613,7 @@ struct WorkspaceView: View {
             .frame(height: 46)
 
             HStack(spacing: 10) {
-                ConsoleTabs(tabs: ResponseTab.allCases, selection: $responseTab) { $0.rawValue }
+                ConsoleTabs(tabs: availableResponseTabs, selection: $responseTab) { $0.rawValue }
                 Spacer(minLength: 0)
                 if responseTab == .curl, let command {
                     Button {
@@ -573,9 +631,7 @@ struct WorkspaceView: View {
                         .font(Console.mono)
                         .foregroundStyle(Console.muted)
                     Button {
-                        if copy(responseTab == .body ? result.body : result.headers) {
-                            copiedTab = responseTab
-                        }
+                        if let visibleText, copy(visibleText) { copiedTab = responseTab }
                     } label: {
                         Label(copiedTab == responseTab ? "已复制" : "复制",
                               systemImage: copiedTab == responseTab ? "checkmark" : "doc.on.doc")
@@ -583,7 +639,7 @@ struct WorkspaceView: View {
                     .font(.system(size: 12, weight: .medium))
                     .buttonStyle(.plain)
                     .foregroundStyle(Console.accent)
-                    .disabled(responseTab == .body ? result.body.isEmpty : result.headers.isEmpty)
+                    .disabled(visibleText?.isEmpty != false)
                 }
             }
             .padding(.horizontal, 12)
@@ -616,32 +672,50 @@ struct WorkspaceView: View {
                     }
                 }
             } else {
-                responseContent
+                responseContent(payload: payload)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .consoleSurface()
     }
 
+    private func responsePayload(_ response: ResponseDetails) -> Result<String, Error> {
+        Result {
+            switch responseTab {
+            case .body, .curl: return response.body
+            case .headers: return response.headers
+            case .extracted:
+                if response.truncated { throw ProjectionError.truncated }
+                guard let resultProjection else { return "" }
+                return try ResponseProjection(resultProjection).format(response.body)
+            }
+        }
+    }
+
     @ViewBuilder
-    private var responseContent: some View {
+    private func responseContent(payload: Result<String, Error>?) -> some View {
         if isSending {
             VStack(spacing: 12) {
                 ConsoleProgress()
                 Text("正在等待响应").foregroundStyle(Console.muted)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let result {
-            let content = responseTab == .body ? result.body : result.headers
-            if content.isEmpty {
-                responseMessage(responseTab == .body ? "没有响应正文" : "没有响应头", symbol: "tray")
-            } else {
-                ScrollView {
-                    Text(content)
-                        .font(Console.mono)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(14)
+        } else if let payload {
+            switch payload {
+            case .failure(let error):
+                responseMessage("无法提取结果", detail: error.localizedDescription, symbol: "exclamationmark.circle")
+            case .success(let text):
+                if text.isEmpty {
+                    let message = responseTab == .extracted ? "没有匹配的字段" : (responseTab == .headers ? "没有响应头" : "没有响应正文")
+                    responseMessage(message, symbol: "tray")
+                } else {
+                    ScrollView {
+                        Text(verbatim: text)
+                            .font(Console.mono)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(14)
+                    }
                 }
             }
         } else if let error {
@@ -689,6 +763,7 @@ struct WorkspaceView: View {
     }
 
     private func resetResponse() {
+        resultProjection = nil
         activeHistory = nil
         result = nil
         error = nil
@@ -704,10 +779,15 @@ struct WorkspaceView: View {
         return NSPasteboard.general.setString(text, forType: .string)
     }
 
+    private func formattedCommand(_ request: URLRequest, for snapshot: RequestDraft) -> String {
+        CurlCommand.render(request, followsRedirects: snapshot.followsRedirects,
+                           route: snapshot.route, projection: snapshot.projection)
+    }
+
     private func preview(_ snapshot: RequestDraft) async -> Result<String, Error> {
         do {
             let request = try await snapshot.prepareRequest()
-            return .success(CurlCommand.render(request, followsRedirects: snapshot.followsRedirects))
+            return .success(formattedCommand(request, for: snapshot))
         } catch {
             return .failure(error)
         }
@@ -739,7 +819,8 @@ struct WorkspaceView: View {
 
         let template = draft
         resetResponse()
-        responseTab = .body
+        resultProjection = template.projection
+        responseTab = resultProjection == nil ? .body : .extracted
         let start = Date()
         let clock = ContinuousClock()
         let started = clock.now
@@ -751,10 +832,10 @@ struct WorkspaceView: View {
                 try Task.checkCancellation()
                 if template.auth.generated {
                     generatedPreview = AuthPreview(draft: template, command: .success(
-                        CurlCommand.render(request, followsRedirects: template.followsRedirects)
+                        formattedCommand(request, for: template)
                     ))
                 }
-                let response = try await HTTPClient.send(request, followsRedirects: template.followsRedirects)
+                let response = try await HTTPClient.send(request, followsRedirects: template.followsRedirects, route: template.route)
                 try Task.checkCancellation()
                 result = response
             } catch {

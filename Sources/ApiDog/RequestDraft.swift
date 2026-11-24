@@ -50,10 +50,18 @@ struct RequestAuthentication: Codable, Equatable {
     var secret: String?
     var placement: Location?
     var signingURI: String?
+    var signingKeyField: String?
+    var signingKeyInput: String?
+    var signingSecretInput: String?
     var script: String?
     var scriptInputs: [RequestField]?
 
     var location: Location { placement ?? (mode == .hmac ? .query : .header) }
+    var keyField: String {
+        let value = (signingKeyField ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "apikey" : value
+    }
+
     var generated: Bool { mode == .hmac || mode == .script }
 
 }
@@ -67,6 +75,8 @@ struct RequestDraft: Codable, Equatable {
     var auth = RequestAuthentication()
     var body: String?
     var followsRedirects = false
+    var route: RequestRoute?
+    var projection: String?
 
     private static let variableName = "[A-Za-z_][A-Za-z0-9_.-]*"
     private static let placeholder = try! NSRegularExpression(
@@ -74,7 +84,7 @@ struct RequestDraft: Codable, Equatable {
     )
     private static let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 
-    private enum CodingKeys: String, CodingKey { case method, url, headers, query, variables, auth, body, followsRedirects }
+    private enum CodingKeys: String, CodingKey { case method, url, headers, query, variables, auth, body, followsRedirects, route, projection }
 
     init(method: HTTPMethod = .get, url: String = "", headers: [RequestField] = [], query: [RequestField] = [],
          variables: [String: String] = [:], auth: RequestAuthentication = .init(), body: String? = nil,
@@ -108,6 +118,8 @@ struct RequestDraft: Codable, Equatable {
         variables = try data.decodeIfPresent([String: String].self, forKey: .variables) ?? [:]
         auth = try data.decodeIfPresent(RequestAuthentication.self, forKey: .auth) ?? .init()
         followsRedirects = try data.decodeIfPresent(Bool.self, forKey: .followsRedirects) ?? false
+        route = try data.decodeIfPresent(RequestRoute.self, forKey: .route)
+        projection = try data.decodeIfPresent(String.self, forKey: .projection)
     }
 
     var variableNames: [String] {
@@ -146,6 +158,8 @@ struct RequestDraft: Codable, Equatable {
         }
         components.fragment = nil
         guard let destination = components.url else { throw RequestError.invalidURL }
+        try route?.validate(for: destination)
+        if let projection { _ = try ResponseProjection(projection) }
 
         var request = URLRequest(url: destination, timeoutInterval: 30)
         request.httpMethod = method.rawValue
@@ -288,7 +302,12 @@ struct RequestDraft: Codable, Equatable {
             let signedURI = override.isEmpty ? uri : try expand(override)
             let message = [name, secret, signedURI, timestamp].joined(separator: "_")
             fields.query["timestamp"] = timestamp
-            fields.place(name, as: "apikey", at: auth.location)
+            let field = auth.keyField
+            let reserved = auth.location == .header ? field.lowercased() : field
+            guard reserved != "sign", reserved != "timestamp" else {
+                throw RequestError.duplicateAuthentication(field)
+            }
+            fields.place(name, as: field, at: auth.location)
             fields.place(AuthCrypto.hmacBase64URL(secret, message), as: "sign", at: auth.location)
         }
         return fields

@@ -6,6 +6,8 @@ mkdir -p .build/check
 swiftc -module-cache-path .build/check/modules \
   Sources/ApiDog/HTTP.swift Sources/ApiDog/Workspace.swift \
   Sources/ApiDog/RequestDraft.swift Sources/ApiDog/CurlCommand.swift \
-  Sources/ApiDog/AuthFields.swift Sources/ApiDog/AuthScript.swift Tests/Checks.swift \
+  Sources/ApiDog/AuthFields.swift Sources/ApiDog/AuthScript.swift \
+  Sources/ApiDog/RequestRoute.swift Sources/ApiDog/RoutedCurlClient.swift \
+  Sources/ApiDog/ResponseProjection.swift Sources/ApiDog/SignedCurlRecipe.swift Tests/Checks.swift \
   -o .build/check/ApiDogChecks
 .build/check/ApiDogChecks

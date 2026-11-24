@@ -38,7 +38,10 @@ enum HTTPClient {
         return URLSession(configuration: config)
     }()
 
-    static func send(_ request: URLRequest, followsRedirects: Bool = false, using session: URLSession = HTTPClient.session) async throws -> ResponseDetails {
+    static func send(_ request: URLRequest, followsRedirects: Bool = false, using session: URLSession = HTTPClient.session, route: RequestRoute? = nil) async throws -> ResponseDetails {
+        if let route, route.isConfigured {
+            return try await RoutedCurlClient.send(request, route: route, followsRedirects: followsRedirects)
+        }
         let (bytes, response) = try await session.bytes(for: request, delegate: followsRedirects ? nil : NoRedirect())
         guard let http = response as? HTTPURLResponse else { throw RequestError.nonHTTPResponse }
 
