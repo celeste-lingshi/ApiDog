@@ -51,12 +51,19 @@ struct ConsoleTitleBar<Actions: View>: View {
 
     private var wordmark: some View {
         HStack(spacing: 10) {
-            Image(systemName: "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(Console.accent)
-                .frame(width: 30, height: 30)
-                .consoleSurface(Console.accent.opacity(0.10), border: Console.accent.opacity(0.24), radius: 8)
-                .accessibilityHidden(true)
+            Group {
+                if let icon = Bundle.main.image(forResource: "ApiDog") {
+                    Image(nsImage: icon).resizable().scaledToFit()
+                } else {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Console.accent)
+                        .frame(width: 30, height: 30)
+                        .consoleSurface(Console.accent.opacity(0.10), border: Console.accent.opacity(0.24), radius: 8)
+                }
+            }
+            .frame(width: 30, height: 30)
+            .accessibilityHidden(true)
             Text("ApiDog")
                 .font(.system(size: 17, weight: .semibold))
                 .tracking(-0.4)
