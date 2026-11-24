@@ -1,11 +1,30 @@
 import SwiftUI
 
+private struct RequestFolderFrames: PreferenceKey {
+    static let defaultValue: [UUID?: CGRect] = [:]
+
+    static func reduce(value: inout [UUID?: CGRect], nextValue: () -> [UUID?: CGRect]) {
+        value.merge(nextValue()) { _, next in next }
+    }
+}
+
 struct RequestDirectoryView: View {
     let directory: RequestDirectory
     let selectedID: UUID?
     @Binding var collapsed: Set<UUID>
     let select: (SavedRequest) -> Void
     let duplicate: (SavedRequest) -> Void
+    let remove: (SavedRequest) -> Void
+    let move: (UUID, UUID?) -> Bool
+    @State private var folderFrames: [UUID?: CGRect] = [:]
+    @GestureState private var drag: Drag?
+
+    private struct Drag {
+        let requestID: UUID
+        let location: CGPoint
+    }
+
+    private static let coordinateSpace = "request-directory"
 
     var body: some View {
         if directory.categories.isEmpty && directory.requests.isEmpty {
@@ -15,64 +34,61 @@ struct RequestDirectoryView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
         } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 3) {
-                    ForEach(directory.categories) { category in
-                        let closed = collapsed.contains(category.id)
-                        Button {
-                            if closed {
-                                collapsed.remove(category.id)
-                            } else {
-                                collapsed.insert(category.id)
+            GeometryReader { viewport in
+                let bounds = CGRect(origin: .zero, size: viewport.size)
+                let hoveredFolder = drag.flatMap { target(at: $0.location, within: bounds) }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(directory.categories) { category in
+                            let closed = collapsed.contains(category.id)
+                            folder(name: category.name, id: category.id, closed: closed,
+                                   targeted: hoveredFolder.map { $0.key == category.id } ?? false) {
+                                if closed {
+                                    collapsed.remove(category.id)
+                                } else {
+                                    collapsed.insert(category.id)
+                                }
                             }
-                        } label: {
-                            HStack(spacing: 7) {
-                                Image(systemName: closed ? "chevron.right" : "chevron.down")
-                                    .font(.system(size: 8, weight: .bold))
-                                    .frame(width: 10)
-                                    .accessibilityHidden(true)
-                                Image(systemName: closed ? "folder" : "folder.fill")
-                                    .foregroundStyle(Console.accent)
-                                    .accessibilityHidden(true)
-                                Text(category.name)
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                            }
-                            .font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 8)
-                            .frame(height: 32)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityValue(closed ? "已折叠" : "已展开")
 
-                        if !closed {
-                            ForEach(directory.requests(in: category.id)) { request in
-                                row(request)
-                                    .padding(.leading, 14)
+                            if !closed {
+                                ForEach(directory.requests(in: category.id)) { request in
+                                    row(request, within: bounds)
+                                        .padding(.leading, 14)
+                                }
                             }
+                        }
+
+                        folder(name: "未分类", id: nil, targeted: hoveredFolder.map { $0.key == nil } ?? false)
+                        ForEach(directory.requests(in: nil)) { request in
+                            row(request, within: bounds)
                         }
                     }
-
-                    let root = directory.requests(in: nil)
-                    if !root.isEmpty {
-                        Text("未分类")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Console.muted)
-                            .padding(.horizontal, 8)
-                            .padding(.top, 6)
-                        ForEach(root) { request in
-                            row(request)
-                        }
-                    }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 10)
                 }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 10)
+                .coordinateSpace(name: Self.coordinateSpace)
+                .onPreferenceChange(RequestFolderFrames.self) { folderFrames = $0 }
             }
         }
     }
 
-    private func row(_ request: SavedRequest) -> some View {
+    private func target(at location: CGPoint, within bounds: CGRect) -> (key: UUID?, value: CGRect)? {
+        guard bounds.contains(location) else { return nil }
+        return folderFrames.first { $0.value.contains(location) }
+    }
+
+    private func folder(name: String, id: UUID?, closed: Bool = false, targeted: Bool,
+                        toggle: (() -> Void)? = nil) -> some View {
+        RequestFolderRow(name: name, closed: closed, isDropTarget: targeted, toggle: toggle)
+            .background {
+                GeometryReader { row in
+                    Color.clear.preference(key: RequestFolderFrames.self,
+                                           value: [id: row.frame(in: .named(Self.coordinateSpace))])
+                }
+            }
+    }
+
+    private func row(_ request: SavedRequest, within bounds: CGRect) -> some View {
         let selected = request.id == selectedID
         return HStack(spacing: 2) {
             Button {
@@ -95,6 +111,18 @@ struct RequestDirectoryView: View {
             .buttonStyle(.plain)
             .help(request.draft.url.isEmpty ? request.name : request.draft.url)
             .accessibilityAddTraits(selected ? .isSelected : [])
+            .opacity(drag?.requestID == request.id ? 0.55 : 1)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 6, coordinateSpace: .named(Self.coordinateSpace))
+                    .updating($drag) { value, state, _ in
+                        state = Drag(requestID: request.id, location: value.location)
+                    }
+                    .onEnded { value in
+                        if let destination = target(at: value.location, within: bounds) {
+                            _ = move(request.id, destination.key)
+                        }
+                    }
+            )
 
             Button {
                 duplicate(request)
@@ -108,9 +136,65 @@ struct RequestDirectoryView: View {
             .buttonStyle(.plain)
             .help("复制请求")
             .accessibilityLabel("复制请求「\(request.name)」")
+
+            Button {
+                remove(request)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Console.red)
+                    .frame(width: 28, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("删除请求")
+            .accessibilityLabel("删除请求「\(request.name)」")
         }
         .consoleSurface(selected ? Console.selected : .clear,
                         border: selected ? Console.accent.opacity(0.26) : .clear, radius: 6)
+    }
+}
+
+private struct RequestFolderRow: View {
+    let name: String
+    let closed: Bool
+    let isDropTarget: Bool
+    var toggle: (() -> Void)?
+
+    var body: some View {
+        Group {
+            if let toggle {
+                Button(action: toggle) { label }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(closed ? "已折叠" : "已展开")
+            } else {
+                label
+            }
+        }
+    }
+
+    private var label: some View {
+        HStack(spacing: 7) {
+            if toggle != nil {
+                Image(systemName: closed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 10)
+                    .accessibilityHidden(true)
+                Image(systemName: closed ? "folder" : "folder.fill")
+                    .foregroundStyle(Console.accent)
+                    .accessibilityHidden(true)
+            }
+            Text(name)
+                .foregroundStyle(toggle == nil ? Console.muted : Console.text)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 12, weight: .semibold))
+        .padding(.horizontal, 8)
+        .frame(height: 32)
+        .consoleSurface(isDropTarget ? Console.selected : .clear,
+                        border: isDropTarget ? Console.accent : .clear, radius: 6)
+        .contentShape(Rectangle())
     }
 }
 

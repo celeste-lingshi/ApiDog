@@ -172,6 +172,26 @@ struct Checks {
         precondition(afterEdit.requests(in: nil) == [saved])
         let bytes = try Data(contentsOf: storage.file)
         precondition(!String(decoding: bytes, as: UTF8.self).contains("script-api-key"))
+
+        let destination = RequestCategory(name: "归档")
+        workspace.requestDirectory.categories.append(destination)
+        let missingCategory = workspace.requestDirectory.move(editedCopy.id, to: UUID())
+        let missingRequest = workspace.requestDirectory.move(UUID(), to: destination.id)
+        let sameCategory = workspace.requestDirectory.move(editedCopy.id, to: category.id)
+        precondition(!missingCategory && !missingRequest && !sameCategory)
+        let moved = workspace.requestDirectory.move(editedCopy.id, to: destination.id)
+        var expected = editedCopy
+        expected.categoryID = destination.id
+        precondition(moved && workspace.requestDirectory.requests(in: category.id).isEmpty)
+        precondition(workspace.requestDirectory.requests(in: destination.id) == [expected])
+        try storage.save(workspace)
+        let afterMove = try storage.load()
+        precondition(afterMove.requestDirectory.requests(in: destination.id) == [expected])
+        precondition(afterMove.history.count == 1)
+        let movedToRoot = workspace.requestDirectory.move(editedCopy.id, to: nil)
+        expected.categoryID = nil
+        precondition(movedToRoot && workspace.requestDirectory.requests(in: nil) == [saved, expected])
+
         let wrongKey = WorkspaceStorage(file: storage.file, credentialKey: { _ in SymmetricKey(size: .bits256) })
         do {
             _ = try wrongKey.load()

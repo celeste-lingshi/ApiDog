@@ -31,8 +31,9 @@ struct WorkspaceView: View {
     }
 
     private enum Modal: Equatable {
-        case importCurl, clearHistory, newCategory, newRequest, saveAs, requestDetails, removeRequest
+        case importCurl, clearHistory, newCategory, newRequest, saveAs, requestDetails
         case duplicateRequest(SavedRequest)
+        case removeRequest(UUID)
     }
     private enum SidebarTab: String, CaseIterable { case directory = "请求目录", history = "请求历史" }
 
@@ -157,13 +158,13 @@ struct WorkspaceView: View {
                             if canOpen { openSavedRequest(copy) }
                             closeModal()
                         }
-                    case .removeRequest:
-                        if let request = activeSavedRequest {
+                    case .removeRequest(let id):
+                        if let request = directory.requests.first(where: { $0.id == id }) {
                             ConsoleConfirmationDialog(title: "删除「\(request.name)」？",
                                                message: "这条请求将从目录移除，发送历史会保留。",
                                                confirmTitle: "删除请求", cancel: closeModal) {
-                                model.workspace.requestDirectory.requests.removeAll { $0.id == request.id }
-                                activeSavedID = nil
+                                model.workspace.requestDirectory.requests.removeAll { $0.id == id }
+                                if activeSavedID == id { activeSavedID = nil }
                                 model.save()
                                 closeModal()
                             }
@@ -241,6 +242,13 @@ struct WorkspaceView: View {
         sidebarTab = .directory
     }
 
+    private func moveRequest(_ id: UUID, to categoryID: UUID?) -> Bool {
+        guard !isSending, modal == nil, model.workspace.requestDirectory.move(id, to: categoryID) else { return false }
+        if let categoryID { collapsedCategories.remove(categoryID) }
+        model.save()
+        return true
+    }
+
     private func openSavedRequest(_ request: SavedRequest) {
         urlFocused = false
         activeSavedID = request.id
@@ -273,6 +281,10 @@ struct WorkspaceView: View {
                     var source = request
                     if source.id == activeSavedID { source.draft = draft }
                     openModal(.duplicateRequest(source))
+                } remove: { request in
+                    openModal(.removeRequest(request.id))
+                } move: { id, categoryID in
+                    moveRequest(id, to: categoryID)
                 }
                 .disabled(isSending)
             } else {
@@ -457,9 +469,6 @@ struct WorkspaceView: View {
             if activeSavedRequest != nil {
                 options.append(DropdownOption(title: "改名或移动请求", icon: "pencil") {
                     openModal(.requestDetails)
-                })
-                options.append(DropdownOption(title: "删除当前请求", icon: "trash", tone: Console.red) {
-                    openModal(.removeRequest)
                 })
             }
             return options

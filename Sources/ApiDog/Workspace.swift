@@ -63,6 +63,14 @@ struct RequestDirectory: Codable, Equatable {
             requests.append(request)
         }
     }
+
+    mutating func move(_ requestID: UUID, to categoryID: UUID?) -> Bool {
+        guard categoryID == nil || categories.contains(where: { $0.id == categoryID }),
+              let index = requests.firstIndex(where: { $0.id == requestID }),
+              requests[index].categoryID != categoryID else { return false }
+        requests[index].categoryID = categoryID
+        return true
+    }
 }
 
 struct Workspace: Codable, Equatable {
