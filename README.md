@@ -13,10 +13,10 @@
 
 ## 构建
 
-需要 macOS 13 或更新版本和 Swift 5.9 或更新版本。没有需要下载的第三方依赖。
+需要 macOS 13 或更新版本、Go 1.25.8 或更新版本，以及 Xcode 命令行工具。界面资源随 Go 二进制打包，Wails 使用系统的 WebKit 渲染。定向检查还需要 Node.js。
 
 ```bash
-swift run
+go run -tags production .
 bash scripts/check.sh
 bash scripts/package.sh
 ```

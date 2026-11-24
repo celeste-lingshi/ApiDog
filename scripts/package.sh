@@ -2,10 +2,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-swift build --disable-sandbox -c release
-binary_dir="$(swift build --disable-sandbox -c release --show-bin-path)"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
+go build -tags production -trimpath -o "$stage/ApiDog" .
 app="dist/ApiDog.app"
 iconset="$stage/ApiDog.iconset"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
@@ -15,7 +14,7 @@ for size in 16 32 128 256 512; do
   sips -z "$double" "$double" assets/ApiDog.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/ApiDog.icns"
-install -m 755 "$binary_dir/ApiDog" "$app/Contents/MacOS/ApiDog"
+install -m 755 "$stage/ApiDog" "$app/Contents/MacOS/ApiDog"
 cp scripts/Info.plist "$app/Contents/Info.plist"
 codesign --force --sign - "$app"
 

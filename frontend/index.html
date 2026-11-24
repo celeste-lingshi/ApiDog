@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ApiDog</title>
+<link rel="stylesheet" href="/style.css">
+<script defer src="/app.js"></script>
+</head>
+<body>
+<header class="titlebar">
+  <div class="brand"><img src="/brand.png" alt=""><strong>ApiDog</strong></div>
+  <button class="button" id="theme-menu" type="button"></button>
+  <button class="button" id="import" type="button"></button>
+  <div class="window-actions" aria-label="窗口操作">
+    <button class="icon-button" id="minimize" type="button" aria-label="最小化窗口"></button>
+    <button class="icon-button" id="fullscreen" type="button" aria-label="切换全屏"></button>
+    <button class="icon-button danger" id="close-window" type="button" aria-label="关闭窗口"></button>
+  </div>
+</header>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <div class="tabs" id="sidebar-tabs" role="tablist" aria-label="请求导航"></div>
+      <button class="button small" id="sidebar-menu" type="button" aria-label="目录与历史操作"></button>
+    </div>
+    <div id="history-search" class="search" hidden>
+      <label for="history-query" id="search-icon"></label>
+      <input type="search" id="history-query" placeholder="搜索请求" aria-label="搜索请求历史" autocomplete="off">
+    </div>
+    <div id="sidebar-list" class="sidebar-list"></div>
+  </aside>
+  <main class="workspace">
+    <div id="breadcrumb" class="breadcrumb" hidden></div>
+    <form id="address-bar" class="address-bar">
+      <button id="method" type="button" class="method-switch"></button>
+      <input id="address" aria-label="请求地址" spellcheck="false" autocomplete="off" placeholder="http://111/{hostname}/ping">
+      <button id="save" class="button" type="button"></button>
+      <button id="save-as" class="button" type="button" hidden>另存为</button>
+      <button id="send" class="button primary" type="submit"></button>
+    </form>
+    <div class="panes">
+      <section class="panel" id="request-panel">
+        <div class="panel-head"><h2 id="request-heading"></h2><label class="check"><input id="redirects" type="checkbox">跟随跳转</label></div>
+        <div id="request-tabs" class="tabs panel-tabs" role="tablist" aria-label="请求参数"></div>
+        <div id="editor" class="editor"></div>
+      </section>
+      <section class="panel" id="response-panel">
+        <div class="panel-head"><h2 id="response-heading"></h2><span id="status"></span></div>
+        <div class="response-tools"><div id="response-tabs" class="tabs" role="tablist" aria-label="响应与预览"></div><span id="response-size"></span><button id="copy-result" class="copy-result" type="button" hidden></button></div>
+        <div id="response-content" class="response-content"></div>
+      </section>
+    </div>
+  </main>
+</div>
+<footer id="storage-banner" hidden><span id="storage-issue"></span><button class="button" id="migrate" type="button" hidden>迁移认证</button></footer>
+<div id="menu" class="dropdown" role="menu" hidden></div>
+<dialog id="dialog"></dialog>
+<div id="notification" role="status" hidden></div>
+</body>
+</html>
