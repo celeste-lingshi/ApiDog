@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Security
 
 struct EnvironmentVariable: Identifiable, Codable, Equatable {
     var id = UUID()
@@ -68,6 +70,9 @@ struct Workspace: Codable, Equatable {
     var selectedEnvironmentID: UUID?
     var history: [HistoryEntry] = []
     var directory: RequestDirectory?
+    fileprivate var encryptedCredentials: Data?
+
+    init() {}
 
     var requestDirectory: RequestDirectory {
         get { directory ?? RequestDirectory() }
@@ -99,16 +104,47 @@ struct Workspace: Codable, Equatable {
     }
 }
 
-struct WorkspaceStorage {
-    var file: URL
+final class WorkspaceStorage {
+    let file: URL
+    private let credentialKey: (Bool) throws -> SymmetricKey
+    private var cachedKey: SymmetricKey?
 
     static let local = WorkspaceStorage(file: URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Application Support/ApiDog/workspace.json"))
 
+    init(file: URL, credentialKey: @escaping (Bool) throws -> SymmetricKey = WorkspaceCredentialKey.load) {
+        self.file = file
+        self.credentialKey = credentialKey
+    }
+
+    private func key(create: Bool) throws -> SymmetricKey {
+        if let cachedKey { return cachedKey }
+        let key = try credentialKey(create)
+        cachedKey = key
+        return key
+    }
+
     func load() throws -> Workspace {
         do {
             let data = try Data(contentsOf: file)
-            return try JSONDecoder().decode(Workspace.self, from: data)
+            var workspace = try JSONDecoder().decode(Workspace.self, from: data)
+            if let encrypted = workspace.encryptedCredentials {
+                let key = try key(create: false)
+                let sealed = try AES.GCM.SealedBox(combined: encrypted)
+                let decoded = try AES.GCM.open(sealed, using: key)
+                let credentials = try JSONDecoder().decode([UUID: RequestCredentials].self, from: decoded)
+                if var directory = workspace.directory {
+                    for index in directory.requests.indices {
+                        if let credential = credentials[directory.requests[index].id] {
+                            directory.requests[index].draft.auth = credential.authentication
+                            directory.requests[index].draft.variables.merge(credential.variables) { _, saved in saved }
+                        }
+                    }
+                    workspace.directory = directory
+                }
+                workspace.encryptedCredentials = nil
+            }
+            return workspace
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             return Workspace()
         }
@@ -125,11 +161,23 @@ struct WorkspaceStorage {
         for entry in persisted.history.indices {
             persisted.history[entry].request = persisted.history[entry].request.withoutStoredAuthentication()
         }
+        var credentials: [UUID: RequestCredentials] = [:]
         if var directory = persisted.directory {
             for index in directory.requests.indices {
-                directory.requests[index].draft = directory.requests[index].draft.withoutStoredAuthentication()
+                let request = directory.requests[index]
+                let redacted = request.draft.withoutStoredAuthentication()
+                if redacted != request.draft {
+                    let variables = request.draft.variables.filter { redacted.variables[$0.key] == nil }
+                    credentials[request.id] = RequestCredentials(authentication: request.draft.auth, variables: variables)
+                    directory.requests[index].draft = redacted
+                }
             }
             persisted.directory = directory
+        }
+        if !credentials.isEmpty {
+            let data = try JSONEncoder().encode(credentials)
+            let key = try key(create: true)
+            persisted.encryptedCredentials = try AES.GCM.seal(data, using: key).combined
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -140,5 +188,47 @@ struct WorkspaceStorage {
             attributes: [.posixPermissions: 0o700]
         )
         try data.write(to: file, options: .atomic)
+    }
+}
+
+private struct RequestCredentials: Codable {
+    var authentication: RequestAuthentication
+    var variables: [String: String]
+}
+
+enum WorkspaceCredentialKey {
+    static func load(create: Bool) throws -> SymmetricKey {
+        let item: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "com.celeste-lingshi.apidog.workspace",
+            kSecAttrAccount as String: "工作区加密密钥"
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(item.merging([kSecReturnData as String: true]) { _, new in new } as CFDictionary, &result)
+        if status == errSecSuccess {
+            guard let data = result as? Data, data.count == 32 else { throw KeychainError.invalidKey }
+            return SymmetricKey(data: data)
+        }
+        guard status == errSecItemNotFound, create else { throw KeychainError.access(status) }
+        let key = SymmetricKey(size: .bits256)
+        var newItem = item
+        newItem[kSecValueData as String] = key.withUnsafeBytes { Data($0) }
+        let added = SecItemAdd(newItem as CFDictionary, nil)
+        guard added == errSecSuccess else { throw KeychainError.access(added) }
+        return key
+    }
+
+    private enum KeychainError: LocalizedError {
+        case access(OSStatus), invalidKey
+
+        var errorDescription: String? {
+            switch self {
+            case .access(let status):
+                let detail = SecCopyErrorMessageString(status, nil) as String? ?? String(status)
+                return "无法访问 ApiDog 的钥匙串密钥。\(detail)"
+            case .invalidKey:
+                return "ApiDog 的钥匙串密钥格式不正确。"
+            }
+        }
     }
 }

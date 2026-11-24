@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 @main
@@ -103,14 +104,15 @@ struct Checks {
     static func checkRequestDirectory() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let storage = WorkspaceStorage(file: folder.appendingPathComponent("workspace.json"))
+        let key = SymmetricKey(size: .bits256)
+        let storage = WorkspaceStorage(file: folder.appendingPathComponent("workspace.json"), credentialKey: { _ in key })
         var workspace = try storage.load()
         let category = RequestCategory(name: "测试分组")
         workspace.requestDirectory.categories.append(category)
         let draft = RequestDraft(
             url: "https://example.com/{host}/ping",
             variables: ["host": "example", "token": "directory-private-key"],
-            auth: RequestAuthentication(mode: .bearer, secret: "{token}")
+            auth: RequestAuthentication(mode: .hmac, name: "directory-api-key", secret: "{token}")
         )
         var saved = SavedRequest(name: "查询接口", categoryID: category.id, draft: draft)
         workspace.requestDirectory.store(saved)
@@ -124,15 +126,19 @@ struct Checks {
         precondition(workspace.history.count == 1)
 
         try storage.save(workspace)
-        let restored = try storage.load()
+        let reopened = WorkspaceStorage(file: storage.file, credentialKey: { create in
+            precondition(!create)
+            return key
+        })
+        let restored = try reopened.load()
         let contents = try String(contentsOf: storage.file, encoding: .utf8)
         precondition(restored.requestDirectory.categories == [category])
         precondition(restored.requestDirectory.requests.count == 1)
         precondition(restored.requestDirectory.requests[0].id == saved.id)
         precondition(restored.requestDirectory.requests[0].name == "重新命名")
-        precondition(restored.requestDirectory.requests[0].draft.auth.secret == nil)
-        precondition(restored.requestDirectory.requests[0].draft.variables == ["host": "example"])
-        precondition(!contents.contains("directory-private-key"))
+        precondition(restored.requestDirectory.requests[0].draft == draft)
+        precondition(restored.history[0].request == draft.withoutStoredAuthentication())
+        precondition(!contents.contains("directory-private-key") && !contents.contains("directory-api-key"))
 
         workspace.history.removeAll()
         precondition(workspace.requestDirectory.requests == [saved])
@@ -154,14 +160,23 @@ struct Checks {
         precondition(workspace.requestDirectory.requests(in: category.id) == [copy])
         var editedCopy = copy
         editedCopy.draft.variables["host"] = "copied"
+        editedCopy.draft.auth = RequestAuthentication(mode: .script, script: "function generate() {}",
+                                                     scriptInputs: [RequestField("key", "script-api-key")])
+        editedCopy.draft.variables.removeValue(forKey: "token")
         workspace.requestDirectory.store(editedCopy)
         precondition(workspace.requestDirectory.requests(in: nil) == [saved])
 
         try storage.save(workspace)
-        let savedCopies = try storage.load().requestDirectory.requests(in: category.id)
-        var expected = editedCopy
-        expected.draft = editedCopy.draft.withoutStoredAuthentication()
-        precondition(savedCopies == [expected])
+        let afterEdit = try storage.load().requestDirectory
+        precondition(afterEdit.requests(in: category.id) == [editedCopy])
+        precondition(afterEdit.requests(in: nil) == [saved])
+        let bytes = try Data(contentsOf: storage.file)
+        precondition(!String(decoding: bytes, as: UTF8.self).contains("script-api-key"))
+        let wrongKey = WorkspaceStorage(file: storage.file, credentialKey: { _ in SymmetricKey(size: .bits256) })
+        do {
+            _ = try wrongKey.load()
+            preconditionFailure("用错误的密钥打开了认证信息")
+        } catch CryptoKitError.authenticationFailure {}
     }
 
     static func checkCurl() throws {

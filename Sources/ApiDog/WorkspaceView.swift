@@ -31,7 +31,7 @@ struct WorkspaceView: View {
     }
 
     private enum Modal: Equatable {
-        case importCurl, clearHistory, newCategory, newRequest, saveRequest, removeRequest
+        case importCurl, clearHistory, newCategory, newRequest, saveAs, requestDetails, removeRequest
         case duplicateRequest(SavedRequest)
     }
     private enum SidebarTab: String, CaseIterable { case directory = "请求目录", history = "请求历史" }
@@ -134,8 +134,19 @@ struct WorkspaceView: View {
                             model.save()
                             closeModal()
                         }
-                    case .newRequest, .saveRequest:
-                        requestMetadataDialog(creating: modal == .newRequest)
+                    case .newRequest:
+                        requestMetadataDialog(title: "新建请求", request: SavedRequest(name: "", categoryID: nil, draft: RequestDraft()),
+                                              openInEditor: true)
+                    case .saveAs:
+                        let saved = activeSavedRequest
+                        let suggested = URLComponents(string: draft.url)?.path.split(separator: "/").last.map(String.init) ?? ""
+                        requestMetadataDialog(title: saved == nil ? "保存请求" : "另存为",
+                                              request: SavedRequest(name: saved.map { "\($0.name) 副本" } ?? suggested,
+                                                                    categoryID: saved?.categoryID, draft: draft))
+                    case .requestDetails:
+                        if let request = activeSavedRequest {
+                            requestMetadataDialog(title: "改名或移动请求", request: request)
+                        }
                     case .duplicateRequest(let source):
                         RequestMetadataDialog(title: "复制请求", name: "\(source.name) 副本",
                                               categories: directory.categories, categoryID: source.categoryID,
@@ -197,23 +208,30 @@ struct WorkspaceView: View {
         modal = nil
     }
 
-    private func requestMetadataDialog(creating: Bool) -> some View {
-        let existing = creating ? nil : activeSavedRequest
-        let suggested = URLComponents(string: draft.url)?.path.split(separator: "/").last.map(String.init) ?? ""
-        return RequestMetadataDialog(title: creating ? "新建请求" : "保存请求",
-                                     name: creating ? "" : (existing?.name ?? suggested),
-                                     categories: directory.categories, categoryID: existing?.categoryID,
+    private func requestMetadataDialog(title: String, request: SavedRequest, openInEditor: Bool = false) -> some View {
+        RequestMetadataDialog(title: title, name: request.name,
+                                     categories: directory.categories, categoryID: request.categoryID,
                                      cancel: closeModal) { name, categoryID in
-            let request = SavedRequest(id: existing?.id ?? UUID(), name: name, categoryID: categoryID,
-                                       draft: creating ? RequestDraft() : draft)
-            storeRequest(request)
-            if creating {
-                openSavedRequest(request)
+            var updated = request
+            updated.name = name
+            updated.categoryID = categoryID
+            storeRequest(updated)
+            if openInEditor {
+                openSavedRequest(updated)
             } else {
-                activeSavedID = request.id
+                activeSavedID = updated.id
             }
             closeModal()
         }
+    }
+
+    private func saveCurrentRequest() {
+        guard var request = activeSavedRequest else {
+            openModal(.saveAs)
+            return
+        }
+        request.draft = draft
+        storeRequest(request)
     }
 
     private func storeRequest(_ request: SavedRequest) {
@@ -437,6 +455,9 @@ struct WorkspaceView: View {
                 DropdownOption(title: "新建请求", icon: "doc.badge.plus") { openModal(.newRequest) }
             ]
             if activeSavedRequest != nil {
+                options.append(DropdownOption(title: "改名或移动请求", icon: "pencil") {
+                    openModal(.requestDetails)
+                })
                 options.append(DropdownOption(title: "删除当前请求", icon: "trash", tone: Console.red) {
                     openModal(.removeRequest)
                 })
@@ -484,14 +505,19 @@ struct WorkspaceView: View {
             .disabled(isSending)
             .onSubmit { if hasAddress && !isSending { sendOrCancel() } }
 
-            Button {
-                openModal(.saveRequest)
-            } label: {
+            Button(action: saveCurrentRequest) {
                 Label("保存", systemImage: "tray.and.arrow.down")
             }
             .buttonStyle(ConsoleButton())
             .keyboardShortcut("s", modifiers: .command)
             .disabled(isSending || (!hasAddress && activeSavedID == nil))
+
+            if activeSavedRequest != nil {
+                Button("另存为") { openModal(.saveAs) }
+                    .buttonStyle(ConsoleButton())
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                    .disabled(isSending)
+            }
 
             Button(action: sendOrCancel) {
                 HStack(spacing: 7) {
