@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,7 @@ type Response struct {
 	Truncated       bool    `json:"truncated"`
 	Extracted       *string `json:"extracted,omitempty"`
 	ExtractionError string  `json:"extractionError,omitempty"`
+	RedirectBlocked string  `json:"redirectBlocked,omitempty"`
 }
 
 type step struct {
@@ -141,8 +143,13 @@ func (p *prepared) Send(ctx context.Context) (Response, error) {
 }
 
 func (p *prepared) sendHTTP(ctx context.Context) (Response, error) {
+	var blocked string
 	client := http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if !p.redirects {
+			return http.ErrUseLastResponse
+		}
+		if p.authenticated && !canFollowAuthenticated(p.url, req.URL) {
+			blocked = redirectDisplay(req.URL)
 			return http.ErrUseLastResponse
 		}
 		if len(via) >= 20 {
@@ -186,10 +193,92 @@ func (p *prepared) sendHTTP(ctx context.Context) (Response, error) {
 	for _, key := range sortedKeys(response.Header) {
 		lines = append(lines, key+": "+strings.Join(response.Header[key], ", "))
 	}
-	return makeResponse(response.StatusCode, strings.Join(lines, "\n"), response.Header.Get("Content-Type"), data), nil
+	result := makeResponse(response.StatusCode, strings.Join(lines, "\n"), response.Header.Get("Content-Type"), data)
+	result.RedirectBlocked = blocked
+	return result, nil
 }
 
 func (p *prepared) sendRouted(ctx context.Context) (Response, error) {
+	if !p.redirects || !p.authenticated {
+		return p.sendRoutedOnce(ctx)
+	}
+	hop := *p
+	hop.redirects = false
+	for redirects := 0; ; redirects++ {
+		result, err := hop.sendRoutedOnce(ctx)
+		if err != nil {
+			return result, err
+		}
+		location := redirectLocation(result)
+		if location == "" {
+			return result, nil
+		}
+		next, err := hop.url.Parse(location)
+		if err != nil {
+			return Response{}, errors.New("跳转目标地址无效。")
+		}
+		if !canFollowAuthenticated(p.url, next) {
+			result.RedirectBlocked = redirectDisplay(next)
+			return result, nil
+		}
+		if redirects >= 19 {
+			return Response{}, errors.New("重定向次数超过限制。")
+		}
+		next.RawQuery = normalizeRawQuery(next.RawQuery)
+		next.Fragment = ""
+		hop.url = next
+		switch result.Status {
+		case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther:
+			if hop.body != nil {
+				// cURL 只把隐式 POST 改为 GET，显式方法仍沿用原设置。
+				if hop.method == http.MethodPost {
+					hop.method = http.MethodGet
+				}
+				hop.body = nil
+				hop.headers = hop.headers.Clone()
+				hop.headers.Del("Content-Length")
+			}
+		}
+	}
+}
+
+func canFollowAuthenticated(origin, target *url.URL) bool {
+	port := func(u *url.URL) string {
+		if explicit := u.Port(); explicit != "" {
+			return explicit
+		}
+		if u.Scheme == "https" {
+			return "443"
+		}
+		return "80"
+	}
+	return target.User == nil && origin.Scheme == target.Scheme &&
+		strings.EqualFold(origin.Hostname(), target.Hostname()) && port(origin) == port(target)
+}
+
+func redirectDisplay(target *url.URL) string {
+	summary := url.URL{Scheme: target.Scheme, Host: target.Host, Path: target.Path, RawPath: target.RawPath}
+	if summary.Host == "" {
+		return "外部地址"
+	}
+	return summary.String()
+}
+
+func redirectLocation(response Response) string {
+	switch response.Status {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		for _, line := range strings.Split(response.Headers, "\n") {
+			name, value, _ := strings.Cut(line, ":")
+			if strings.EqualFold(name, "Location") {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return ""
+}
+
+func (p *prepared) sendRoutedOnce(ctx context.Context) (Response, error) {
 	folder, err := os.MkdirTemp("", "apidog-response-")
 	if err != nil {
 		return Response{}, err

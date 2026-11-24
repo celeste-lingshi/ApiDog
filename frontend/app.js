@@ -59,8 +59,8 @@ const message = error => String(error?.message ?? error);
 const collapsed = new Set();
 let state = {directory:{categories:[],requests:[]},history:[],locked:false,issue:""};
 let draft = newDraft(), savedID = null, historyID = null, sidebar = "directory", requestTab = "variables", responseTab = "curl";
-let theme = "dark", result = null, failure = "", cancelled = false, sending = false, migrating = false;
-let preview = "", previewError = "", previewSequence = 0, previewTimer, noticeTimer, copied = "";
+let theme = "dark", result = null, elapsed = 0, failure = "", cancelled = false, sending = false, migrating = false;
+let preview = null, previewError = "", previewSequence = 0, previewTimer, previewTask, noticeTimer, copied = "";
 let dragged = null, menuAnchor = null, menuItems = [], dialogSubmit = null;
 const systemTheme = matchMedia("(prefers-color-scheme: dark)");
 
@@ -96,14 +96,14 @@ function notify(text) {
 }
 
 function selectDraft(next, existing=null, history=null) {
-  draft=normalize(next); savedID=existing; historyID=history; result=null; failure=""; cancelled=false;
+  draft=normalize(next); savedID=existing; historyID=history; result=null; elapsed=0; failure=""; cancelled=false;
   responseTab="curl"; copied="";
   requestTab=variableNames().length ? "variables" : draft.auth.mode!=="none" ? "authentication"
     : draft.headers.length ? "headers" : draft.query.length ? "query" : draft.body!=null ? "body" : "variables";
   by("address").value=draft.url;
   by("redirects").checked=draft.followsRedirects;
-  render();
   schedulePreview();
+  render();
 }
 
 function tabs(element, values, selected) {
@@ -273,15 +273,17 @@ function renderResponse() {
   const heading=by("response-heading");
   heading.innerHTML=icon("terminal")+(responseTab==="curl"?"cURL 预览":"响应");
   const history=state.history.find(entry=>entry.id===historyID);
-  by("status").innerHTML=responseTab!=="curl"&&history
-    ?'<b style="--status:var(--'+(history.status==null?"red":history.status<300?"accent":history.status<400?"amber":"red")+')">'
-      +(history.status==null?"请求失败":"HTTP "+history.status)+'</b><span>'+history.milliseconds+' ms</span>':"";
+  const status=result?.status??history?.status;
+  const milliseconds=result||failure?elapsed:history?.milliseconds;
+  by("status").innerHTML=responseTab!=="curl"&&(result||failure||history)
+    ?'<b style="--status:var(--'+(status==null?"red":status<300?"accent":status<400?"amber":"red")+')">'
+      +(status==null?"请求失败":"HTTP "+status)+'</b><span>'+(milliseconds??0)+' ms</span>':"";
   by("response-size").textContent=responseTab!=="curl"&&result?(result.truncated?"前 256 KiB":result.byteCount+" B"):"";
   const box=by("response-content");
   const copy=by("copy-result");
   let text="",warning="",title="",emptyIcon="terminal";
   if (responseTab==="curl") {
-    text=preview;
+    text=preview?.command??"";
     warning=previewError;
     title=hasAddress()?"等待补全请求":"等待输入请求";
   } else if (responseTab==="extracted") {
@@ -297,12 +299,19 @@ function renderResponse() {
   } else if (text) {
     box.innerHTML=`<pre>${escape(text)}</pre>`+(responseTab==="curl"&&draft.auth.mode!=="none"
       ?`<p class="hint">${icon("key")} ${generated()?"含认证信息，复制和发送会重新生成":"预览包含认证信息"}</p>`:"");
+    if (responseTab==="curl" && preview?.firstHopOnly) {
+      box.insertAdjacentHTML("beforeend",'<p class="hint">含认证的 cURL 只发送首跳。应用内可继续跟随同源跳转。</p>');
+    }
   } else {
     const responseFailure=warning&&responseTab!=="curl";
     if (responseFailure) {title="请求或提取失败";emptyIcon="warning";}
     box.innerHTML=`<div class="empty ${responseFailure?"error":""}">${icon(emptyIcon)}<h3>${escape(title)}</h3>${warning?`<p>${escape(warning)}</p>`:""}</div>`;
   }
+  if (responseTab!=="curl" && result?.redirectBlocked) {
+    box.insertAdjacentHTML("afterbegin",`<p class="redirect-notice">${icon("warning")} 已停止跨站跳转，目标为 ${escape(result.redirectBlocked)}</p>`);
+  }
   copy.hidden=!text||sending&&responseTab!=="curl";
+  copy.disabled=!text;
   copy.innerHTML=icon(copied===responseTab?"check":"copy")+(copied===responseTab?"已复制":responseTab==="curl"?"复制命令":"复制");
 }
 function renderBanner() {
@@ -313,23 +322,38 @@ function renderBanner() {
   by("migrate").textContent=migrating?"等待钥匙串授权":"迁移认证";
 }
 function render() {renderAddress();renderSidebar();renderEditor();renderResponse();renderBanner();}
-function schedulePreview() {
-  const sequence=++previewSequence;
+function stopPreview() {
+  ++previewSequence;
   clearTimeout(previewTimer);
-  preview="";previewError="";
-  copied="";
-  renderResponse();
-  if (!hasAddress()||state.locked) return;
+  if (previewTask) {
+    previewTask=null;
+    rpc("CancelPreview").catch(()=>{});
+  }
+}
+async function requestPreview(snapshot) {
+  const task=rpc("Preview",snapshot);
+  previewTask=task;
+  try { return await task; }
+  finally { if (previewTask===task) previewTask=null; }
+}
+function schedulePreview() {
+  stopPreview();
+  const sequence=previewSequence;
+  preview=null;previewError="";
+  if (copied==="curl") copied="";
+  if (responseTab!=="curl") return;
+  if (!hasAddress()||state.locked) { renderResponse();return; }
+  by("copy-result").disabled=true;
   previewTimer=setTimeout(async()=>{
     try {
-      const command=await rpc("Preview",clone(draft));
+      const command=await requestPreview(clone(draft));
       if (sequence!==previewSequence) return;
       preview=command;
     } catch (error) {
       if (sequence!==previewSequence) return;
       previewError=message(error);
     }
-    renderResponse();
+    if (responseTab==="curl") renderResponse();
   },generated()?180:90);
 }
 function changed() {renderAddress();schedulePreview();}
@@ -608,7 +632,12 @@ by("request-tabs").addEventListener("click",event=>{
 });
 by("response-tabs").addEventListener("click",event=>{
   const button=event.target.closest("[data-tab]");
-  if(button){responseTab=button.dataset.tab;copied="";renderResponse();}
+  if(!button || responseTab===button.dataset.tab)return;
+  responseTab=button.dataset.tab;
+  copied="";
+  if(responseTab!=="curl")stopPreview();
+  renderResponse();
+  if(responseTab==="curl"&&!preview&&!previewError&&!sending)schedulePreview();
 });
 
 function currentFields() {
@@ -674,25 +703,27 @@ async function copyText(text) {
 }
 by("copy-result").addEventListener("click",async()=>{
   const tab=responseTab;
+  const sequence=previewSequence;
   try{
-    let text=tab==="curl"?preview:tab==="headers"?result?.headers:tab==="extracted"?result?.extracted:result?.body;
+    let text=tab==="curl"?preview?.command:tab==="headers"?result?.headers:tab==="extracted"?result?.extracted:result?.body;
     if(tab==="curl"&&generated()){
-      const snapshot=JSON.stringify(draft);
-      const current=await rpc("Preview",clone(draft));
-      if(snapshot!==JSON.stringify(draft))return;
-      preview=text=current;
+      const current=await requestPreview(clone(draft));
+      if(sequence!==previewSequence||responseTab!==tab)return;
+      preview=current;
+      text=current.command;
     }
     if(!text)return;
     await copyText(text);
-    copied=tab;renderResponse();
-  } catch(error){notify(message(error));}
+    if(responseTab===tab&&(tab!=="curl"||sequence===previewSequence)){copied=tab;renderResponse();}
+  } catch(error){if(tab!=="curl"||sequence===previewSequence)notify(message(error));}
 });
 
 async function sendOrCancel() {
   if(sending){await rpc("Cancel");return;}
   if(!hasAddress()||state.locked||by("dialog").open)return;
   closeMenu();
-  sending=true;cancelled=false;failure="";result=null;copied="";
+  stopPreview();
+  sending=true;cancelled=false;failure="";result=null;elapsed=0;copied="";
   responseTab=draft.projection?"extracted":"body";
   render();
   try {
@@ -700,10 +731,11 @@ async function sendOrCancel() {
     adopt(reply.state);
     historyID=reply.historyID??null;
     result=reply.response;
+    elapsed=reply.milliseconds;
     failure=reply.error??"";
     cancelled=!!reply.cancelled;
     if(reply.curl){++previewSequence;preview=reply.curl;previewError="";}
-    if(cancelled)responseTab="body";
+    if(cancelled||result?.redirectBlocked)responseTab="body";
   }catch(error){failure=message(error);}
   finally{sending=false;render();}
 }

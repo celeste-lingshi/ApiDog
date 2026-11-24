@@ -213,7 +213,31 @@ func parseURL(address string) (*url.URL, error) {
 	if err != nil || u.Hostname() == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, errors.New("请输入完整的 HTTP 或 HTTPS 地址。")
 	}
+	u.RawQuery = normalizeRawQuery(u.RawQuery)
 	return u, nil
+}
+
+func normalizeRawQuery(raw string) string {
+	const digits = "0123456789ABCDEF"
+	const hex = digits + "abcdef"
+	var result strings.Builder
+	result.Grow(len(raw))
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		switch {
+		case c == '%' && i+2 < len(raw) && strings.ContainsRune(hex, rune(raw[i+1])) && strings.ContainsRune(hex, rune(raw[i+2])):
+			result.WriteString(raw[i : i+3])
+			i += 2
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			strings.ContainsRune("-._~!$&'()*+,;=:@/?", rune(c)):
+			result.WriteByte(c)
+		default:
+			result.WriteByte('%')
+			result.WriteByte(digits[c>>4])
+			result.WriteByte(digits[c&15])
+		}
+	}
+	return result.String()
 }
 
 func queryFields(raw string) ([]Field, error) {
@@ -294,13 +318,14 @@ func (d Draft) resolveRoute(u *url.URL) (*Route, error) {
 var invalidResolve = errors.New("指定解析需要填写「域名:端口:IP」，IPv6 地址用方括号括起。")
 
 type prepared struct {
-	method     string
-	url        *url.URL
-	headers    http.Header
-	body       *string
-	route      *Route
-	projection string
-	redirects  bool
+	method        string
+	url           *url.URL
+	headers       http.Header
+	body          *string
+	route         *Route
+	projection    string
+	redirects     bool
+	authenticated bool
 }
 
 func Prepare(ctx context.Context, d Draft, at time.Time) (*prepared, error) {
@@ -343,7 +368,11 @@ func Prepare(ctx context.Context, d Draft, at time.Time) (*prepared, error) {
 			return nil, err
 		}
 	}
-	p := &prepared{d.Method, u, make(http.Header), nil, route, d.Projection, d.FollowsRedirects}
+	p := &prepared{
+		method: d.Method, url: u, headers: make(http.Header), route: route,
+		projection: d.Projection, redirects: d.FollowsRedirects,
+		authenticated: d.Auth.Mode != "" && d.Auth.Mode != "none",
+	}
 	for i, f := range d.Headers {
 		name, err := d.expand(f.Name, false)
 		if err != nil {
@@ -390,7 +419,29 @@ func Prepare(ctx context.Context, d Draft, at time.Time) (*prepared, error) {
 			p.headers.Set("Content-Type", contentType)
 		}
 	}
+	if !p.authenticated && p.redirects {
+		p.authenticated = hasCredentialFields(p.headers, p.url)
+	}
 	return p, nil
+}
+
+func hasCredentialFields(headers http.Header, address *url.URL) bool {
+	for name := range headers {
+		switch strings.ToLower(name) {
+		case "authorization", "proxy-authorization", "cookie", "api-key", "x-api-key",
+			"x-auth-token", "x-access-token", "x-signature":
+			return true
+		}
+	}
+	for _, part := range strings.Split(address.RawQuery, "&") {
+		name, _, _ := strings.Cut(part, "=")
+		name, _ = url.PathUnescape(name)
+		switch strings.ToLower(name) {
+		case "apikey", "api_key", "api-key", "access_token", "token", "sign", "signature":
+			return true
+		}
+	}
+	return false
 }
 
 type generated struct {

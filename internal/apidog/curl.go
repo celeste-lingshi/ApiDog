@@ -12,12 +12,27 @@ import (
 	"unicode/utf8"
 )
 
-func Preview(ctx context.Context, d Draft) (string, error) {
+type CurlPreview struct {
+	Command      string `json:"command"`
+	FirstHopOnly bool   `json:"firstHopOnly,omitempty"`
+}
+
+func Preview(ctx context.Context, d Draft) (CurlPreview, error) {
+	if err := ctx.Err(); err != nil {
+		return CurlPreview{}, err
+	}
 	p, err := Prepare(ctx, d, time.Now())
 	if err != nil {
-		return "", err
+		return CurlPreview{}, err
 	}
-	return p.Command(), nil
+	if err := ctx.Err(); err != nil {
+		return CurlPreview{}, err
+	}
+	return p.Preview(), nil
+}
+
+func (p *prepared) Preview() CurlPreview {
+	return CurlPreview{Command: p.Command(), FirstHopOnly: p.redirects && p.authenticated}
 }
 
 func (p *prepared) Command() string {
@@ -44,7 +59,7 @@ func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'
 
 func (p *prepared) curlOptions() [][]string {
 	options := [][]string{{"--globoff"}}
-	if p.redirects {
+	if p.redirects && !p.authenticated {
 		options = append(options, []string{"--location"})
 	}
 	if p.route != nil {
