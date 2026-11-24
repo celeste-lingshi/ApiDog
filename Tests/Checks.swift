@@ -6,7 +6,8 @@ struct Checks {
         try checkRequest()
         try checkWorkspace()
         try await checkResponse()
-        print("通过：请求模板、历史保存、临时变量、响应展示与大小限制")
+        try await checkCancellation()
+        print("通过：请求模板、历史保存与搜索、临时变量、响应展示与大小限制、请求取消")
     }
 
     static func checkRequest() throws {
@@ -68,7 +69,39 @@ struct Checks {
         precondition(reloaded.history.first?.request.url == "{{baseUrl}}/100")
         precondition(reloaded.history.last?.request.url == "{{baseUrl}}/1")
         precondition(reloaded.history.first?.request.headers == "Authorization: Bearer {{token}}")
+        precondition(reloaded.matchingHistory(" 200 ").count == 100)
+        precondition(reloaded.matchingHistory("get").count == 100)
+        precondition(reloaded.matchingHistory("默认").count == 100)
+        precondition(reloaded.matchingHistory("/100").first?.request.url == "{{baseUrl}}/100")
+        precondition(reloaded.matchingHistory("404").isEmpty)
         precondition(!contents.contains("example-session-secret"))
+    }
+
+    static func checkCancellation() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FixtureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let (started, signal) = AsyncStream<Void>.makeStream()
+        FixtureProtocol.onWait = {
+            signal.yield(())
+            signal.finish()
+        }
+        defer { FixtureProtocol.onWait = nil }
+
+        let request = try RequestDraft(url: "https://example.com/wait").makeRequest(variables: [:])
+        let pending = Task { try await HTTPClient.send(request, using: session) }
+        for await _ in started {
+            pending.cancel()
+            break
+        }
+        do {
+            _ = try await pending.value
+            preconditionFailure("取消后仍收到响应")
+        } catch is CancellationError {
+        } catch let error as URLError where error.code == .cancelled {
+        }
     }
 
     static func checkResponse() async throws {
@@ -95,10 +128,16 @@ struct Checks {
 }
 
 final class FixtureProtocol: URLProtocol {
+    static var onWait: (() -> Void)?
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        if request.url?.path == "/wait" {
+            Self.onWait?()
+            return
+        }
         guard let url = request.url,
               let response = HTTPURLResponse(
                 url: url, statusCode: 418, httpVersion: "HTTP/1.1",

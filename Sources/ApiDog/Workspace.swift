@@ -46,6 +46,16 @@ struct Workspace: Codable, Equatable {
         environments.first { $0.id == selectedEnvironmentID } ?? environments.first
     }
 
+    func matchingHistory(_ query: String) -> [HistoryEntry] {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return history }
+        return history.filter { entry in
+            let status = entry.status.map(String.init) ?? "失败"
+            return [entry.request.url, entry.request.method.rawValue, entry.environment, status]
+                .contains { $0.localizedStandardContains(term) }
+        }
+    }
+
     mutating func append(_ entry: HistoryEntry) {
         history.insert(entry, at: 0)
         history = Array(history.prefix(100))
