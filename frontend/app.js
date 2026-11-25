@@ -849,6 +849,11 @@ by("migrate").addEventListener("click",async()=>{
 });
 document.addEventListener("keydown",event=>{
   if(event.key==="Escape"&&menuAnchor){closeMenu({restore:true});return;}
+  if(event.altKey&&!event.metaKey&&!event.ctrlKey&&!event.shiftKey&&event.code==="KeyQ"){
+    event.preventDefault();
+    if(!event.repeat)requestClose();
+    return;
+  }
   if(by("dialog").open||!event.metaKey)return;
   if(event.key==="Enter"){event.preventDefault();sendOrCancel().catch(error=>notify(message(error)));}
   if(event.key.toLowerCase()==="s"){
