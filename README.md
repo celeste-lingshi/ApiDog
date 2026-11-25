@@ -25,7 +25,7 @@ bash scripts/package.sh
 
 ## 本地数据
 
-`~/Library/Application Support/ApiDog/workspace.json` 保存请求目录和最近 100 条请求历史，包括请求字段、请求内变量和响应摘要。响应头和正文只在当次打开的窗口里显示，最多读取 256 KiB。
+`~/Library/Application Support/ApiDog/workspace.json` 保存请求目录和最近 50 条请求历史。点击新记录可以查看当时的响应头、正文和提取结果，正文最多读取 256 KiB。旧记录可以继续打开请求和已有的响应摘要。
 
 目录中的请求会保留认证页的密钥。认证值加密保存，解密密钥放在同一目录里仅当前账号可读写的 `workspace.key`。旧版的钥匙串密钥可在应用内迁移一次。请求历史会清除认证页的密钥。直接放进 URL、普通请求头或正文的内容会随历史以明文保存。复制的 cURL 包含请求实际使用的认证信息。
 

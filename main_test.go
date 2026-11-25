@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +67,68 @@ func TestSaveFailure(t *testing.T) {
 	saved, err := a.SaveRequest(request)
 	if err != nil || saved.Issue != "" || saved.Directory.Requests[0].Name != request.Name {
 		t.Fatalf("重新保存时没有落盘：%+v，%v", saved, err)
+	}
+}
+
+func TestHistoryResponses(t *testing.T) {
+	storage := apidog.Storage{Folder: t.TempDir()}
+	var old apidog.Workspace
+	for i := 54; i >= 0; i-- {
+		draft := apidog.NewDraft()
+		draft.URL = fmt.Sprintf("https://example.test/%d", i)
+		old.History = append(old.History, apidog.NewHistory(draft, nil, time.Now()))
+	}
+	file := filepath.Join(storage.Folder, "workspace.json")
+	data, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := storage.Load()
+	if err != nil || len(workspace.History) != 50 || workspace.History[49].ID != old.History[49].ID {
+		t.Fatal("旧工作区没有按最近 50 条加载", err)
+	}
+	a := &App{ctx: t.Context(), storage: storage, workspace: workspace}
+	legacy, err := a.OpenHistory(old.History[0].ID)
+	if err != nil || legacy.Response != nil || legacy.Request.URL != old.History[0].Request.URL {
+		t.Fatal("旧记录应该仍可打开", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-History-Example", "saved")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"reason":[{"port":80}]}`)
+	}))
+	defer server.Close()
+	draft := apidog.NewDraft()
+	draft.URL = server.URL
+	draft.Projection = ".reason[]?.port"
+	reply, err := a.Send(draft)
+	if err != nil || reply.Response == nil || reply.HistoryID == "" || len(reply.State.History) != 50 ||
+		reply.State.History[0].Response != nil || reply.State.History[49].ID != old.History[48].ID {
+		t.Fatal("发送后历史列表的数据不正确", err)
+	}
+	data, err = os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var disk apidog.Workspace
+	if err := json.Unmarshal(data, &disk); err != nil || len(disk.History) != 50 {
+		t.Fatal("工作区文件没有只保留 50 条历史", err)
+	}
+	reloaded, err := storage.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened := &App{ctx: t.Context(), storage: storage, workspace: reloaded}
+	record, err := reopened.OpenHistory(reply.HistoryID)
+	if err != nil || !reflect.DeepEqual(reply.Response, record.Response) ||
+		record.Response.Status != http.StatusBadRequest || !strings.Contains(record.Response.Headers, "X-History-Example: saved") ||
+		record.Response.Extracted == nil || *record.Response.Extracted != "80" {
+		t.Fatalf("重开后响应结果没有读回：%+v，%v", record.Response, err)
 	}
 }
 

@@ -181,11 +181,11 @@ func TestWorkspaceCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := w.HistoryDraft(w.History[0].ID)
+	legacy, err := w.OpenHistory(w.History[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := Prepare(t.Context(), legacy, time.Now())
+	p, err := Prepare(t.Context(), legacy.Request, time.Now())
 	if err != nil || p.url.String() != "https://example.com/ping" || p.headers.Get("X-Legacy") != "one:two" {
 		t.Fatal(p, err)
 	}

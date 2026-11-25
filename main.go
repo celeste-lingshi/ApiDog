@@ -73,7 +73,11 @@ type State struct {
 
 func (a *App) state() State {
 	dir := a.workspace.Requests()
-	state := State{Directory: apidog.Directory{Categories: slices.Clone(dir.Categories), Requests: slices.Clone(dir.Requests)}, History: slices.Clone(a.workspace.History), Locked: len(a.workspace.EncryptedCredentials) > 0}
+	history := slices.Clone(a.workspace.History)
+	for index := range history {
+		history[index].Response = nil
+	}
+	state := State{Directory: apidog.Directory{Categories: slices.Clone(dir.Categories), Requests: slices.Clone(dir.Requests)}, History: history, Locked: len(a.workspace.EncryptedCredentials) > 0}
 	if a.loadErr != nil {
 		state.Issue = "工作区读取失败。草稿可继续编辑，工作区无法写入。\n" + a.loadErr.Error()
 	} else if a.saveErr != nil {
@@ -226,10 +230,10 @@ func (a *App) ClearHistory() (State, error) {
 	return a.save(workspace)
 }
 
-func (a *App) OpenHistory(id string) (apidog.Draft, error) {
+func (a *App) OpenHistory(id string) (apidog.HistoryEntry, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.workspace.HistoryDraft(id)
+	return a.workspace.OpenHistory(id)
 }
 
 func (a *App) Migrate() (State, error) {
@@ -319,7 +323,6 @@ func (a *App) Send(draft apidog.Draft) (SendResult, error) {
 	}()
 	started := time.Now()
 	result := SendResult{}
-	var status *int
 	p, err := apidog.Prepare(ctx, draft, started)
 	if err == nil {
 		command := p.Preview()
@@ -328,7 +331,6 @@ func (a *App) Send(draft apidog.Draft) (SendResult, error) {
 		response, err = p.Send(ctx)
 		if err == nil {
 			result.Response = &response
-			status = &response.Status
 		}
 	}
 	a.mu.Lock()
@@ -342,12 +344,9 @@ func (a *App) Send(draft apidog.Draft) (SendResult, error) {
 	if err != nil {
 		result.Error = err.Error()
 	}
-	entry := apidog.NewHistory(draft, status, started)
+	entry := apidog.NewHistory(draft, result.Response, started)
 	workspace := a.workspace
-	workspace.History = append([]apidog.HistoryEntry{entry}, workspace.History...)
-	if len(workspace.History) > 100 {
-		workspace.History = workspace.History[:100]
-	}
+	workspace.AppendHistory(entry)
 	result.Milliseconds = entry.Milliseconds
 	state, err := a.save(workspace)
 	result.State = state

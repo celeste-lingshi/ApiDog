@@ -25,13 +25,17 @@ type Environment struct {
 	Variables []EnvironmentVariable `json:"variables"`
 }
 type HistoryEntry struct {
-	ID           string  `json:"id"`
-	Date         float64 `json:"date"`
-	Request      Draft   `json:"request"`
-	Environment  string  `json:"environment,omitempty"`
-	Status       *int    `json:"status,omitempty"`
-	Milliseconds int64   `json:"milliseconds"`
+	ID           string    `json:"id"`
+	Date         float64   `json:"date"`
+	Request      Draft     `json:"request"`
+	Environment  string    `json:"environment,omitempty"`
+	Status       *int      `json:"status,omitempty"`
+	Milliseconds int64     `json:"milliseconds"`
+	Response     *Response `json:"response,omitempty"`
 }
+
+const historyLimit = 50
+
 type Category struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -54,8 +58,22 @@ type Workspace struct {
 	EncryptedCredentials  []byte         `json:"encryptedCredentials,omitempty"`
 }
 
-func NewHistory(draft Draft, status *int, started time.Time) HistoryEntry {
-	return HistoryEntry{ID: NewID(), Date: float64(started.UnixNano())/1e9 - 978307200, Request: draft, Status: status, Milliseconds: time.Since(started).Milliseconds()}
+func NewHistory(draft Draft, response *Response, started time.Time) HistoryEntry {
+	entry := HistoryEntry{
+		ID: NewID(), Date: float64(started.UnixNano())/1e9 - 978307200, Request: draft,
+		Milliseconds: time.Since(started).Milliseconds(), Response: response,
+	}
+	if response != nil {
+		entry.Status = &response.Status
+	}
+	return entry
+}
+
+func (w *Workspace) AppendHistory(entry HistoryEntry) {
+	history := make([]HistoryEntry, min(len(w.History)+1, historyLimit))
+	history[0] = entry
+	copy(history[1:], w.History)
+	w.History = history
 }
 
 func (w *Workspace) Requests() *Directory {
@@ -65,7 +83,7 @@ func (w *Workspace) Requests() *Directory {
 	return w.Directory
 }
 
-func (w Workspace) HistoryDraft(id string) (Draft, error) {
+func (w Workspace) OpenHistory(id string) (HistoryEntry, error) {
 	for _, entry := range w.History {
 		if entry.ID != id {
 			continue
@@ -91,9 +109,10 @@ func (w Workspace) HistoryDraft(id string) (Draft, error) {
 			}
 			break
 		}
-		return d, nil
+		entry.Request = d
+		return entry, nil
 	}
-	return Draft{}, errors.New("请求历史已不存在。")
+	return HistoryEntry{}, errors.New("请求历史已不存在。")
 }
 
 type Storage struct{ Folder string }
@@ -151,6 +170,10 @@ func (s Storage) read() (Workspace, error) {
 		return w, err
 	}
 	err = json.Unmarshal(data, &w)
+	if err == nil && len(w.History) > historyLimit {
+		clear(w.History[historyLimit:])
+		w.History = w.History[:historyLimit]
+	}
 	return w, err
 }
 
@@ -233,7 +256,7 @@ func (s Storage) Save(w Workspace) error {
 		}
 		w.Environments[i] = e
 	}
-	w.History = append([]HistoryEntry{}, w.History...)
+	w.History = append([]HistoryEntry{}, w.History[:min(len(w.History), historyLimit)]...)
 	for i, h := range w.History {
 		w.History[i].Request = h.Request.redacted()
 	}

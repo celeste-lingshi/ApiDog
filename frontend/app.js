@@ -59,6 +59,7 @@ const message = error => String(error?.message ?? error);
 const collapsed = new Set();
 let state = {directory:{categories:[],requests:[]},history:[],locked:false,issue:""};
 let draft = newDraft(), savedID = null, historyID = null, sidebar = "directory", requestTab = "variables", responseTab = "curl";
+let historyLoading = false;
 let theme = "dark", result = null, elapsed = 0, failure = "", cancelled = false, sending = false, migrating = false;
 let preview = null, previewError = "", previewSequence = 0, previewTimer, previewTask, noticeTimer, copied = "";
 let dragged = null, menuAnchor = null, menuItems = [], dialogSubmit = null;
@@ -97,7 +98,8 @@ function notify(text) {
 
 function selectDraft(next, existing=null, history=null) {
   draft=normalize(next); savedID=existing; historyID=history; result=null; elapsed=0; failure=""; cancelled=false;
-  responseTab="curl"; copied="";
+  historyLoading=history!==null;
+  responseTab=historyLoading?"body":"curl"; copied="";
   requestTab=variableNames().length ? "variables" : draft.auth.mode!=="none" ? "authentication"
     : draft.headers.length ? "headers" : draft.query.length ? "query" : draft.body!=null ? "body" : "variables";
   by("address").value=draft.url;
@@ -183,7 +185,7 @@ function renderAddress() {
   by("save-as").disabled=disabled;
   by("import").disabled=disabled;
   by("send").innerHTML=(sending?icon("stop")+"取消":icon("send")+"发送 <span class=\"shortcut\">⌘↩</span>");
-  by("send").disabled=state.locked||(!sending&&!hasAddress());
+  by("send").disabled=state.locked||historyLoading||(!sending&&!hasAddress());
 }
 
 function input(id, val, label, placeholder="",password=false) {
@@ -292,10 +294,13 @@ function renderResponse() {
   } else {
     text=(responseTab==="headers"?result?.headers:result?.body)??"";
     warning=failure;
-    title=cancelled?"已取消请求":result?(responseTab==="headers"?"没有响应头":"没有响应正文"):"等待响应";
+    title=cancelled?"已取消请求":result?(responseTab==="headers"?"没有响应头":"没有响应正文")
+      :history?"这条记录没有保存响应":"等待响应";
   }
   if (sending && responseTab!=="curl") {
     box.innerHTML='<div class="empty"><span class="spinner"></span><h3>正在等待响应</h3></div>';
+  } else if (historyLoading && responseTab!=="curl") {
+    box.innerHTML='<div class="empty"><span class="spinner"></span><h3>正在读取历史响应</h3></div>';
   } else if (text) {
     box.innerHTML=`<pre>${escape(text)}</pre>`+(responseTab==="curl"&&draft.auth.mode!=="none"
       ?`<p class="hint">${icon("key")} ${generated()?"含认证信息，复制和发送会重新生成":"预览包含认证信息"}</p>`:"");
@@ -517,7 +522,9 @@ by("sidebar-menu").addEventListener("click",()=>{
     const options=state.history.length ? [{
       title:sending?"发送中，稍后清空":"清空历史",icon:"trash",tone:"var(--red)",choose:sending?null:()=>{
         confirm("清空全部请求历史？","历史请求将被删除，请求目录里的项目会保留。","清空历史",async()=>{
-          adopt(await rpc("ClearHistory"));if (!result) historyID=null;render();
+          adopt(await rpc("ClearHistory"));
+          if (!result){historyID=null;historyLoading=false;}
+          render();
         });
       }
     }] : [{title:"暂无请求历史",icon:"clock"}];
@@ -558,13 +565,24 @@ by("sidebar-list").addEventListener("click",async event=>{
     case "history": {
       if(!entry||sending)break;
       selectDraft(entry.request,null,entry.id);
-      if(!entry.environment)break;
       const opened=draft;
       const snapshot=JSON.stringify(draft);
+      const stillOpen=()=>draft===opened&&historyID===entry.id;
       try{
         const restored=await rpc("OpenHistory",entry.id);
-        if(!sending&&draft===opened&&snapshot===JSON.stringify(draft))selectDraft(restored,null,entry.id);
-      }catch(error){notify(message(error));}
+        if(!stillOpen())break;
+        const variables=restored.request.variables??{};
+        if(snapshot===JSON.stringify(draft)&&JSON.stringify(draft.variables)!==JSON.stringify(variables)){
+          draft.variables=variables;
+          if(requestTab==="variables")renderEditor();
+          schedulePreview();
+        }
+        result=restored.response??null;
+        elapsed=restored.milliseconds;
+      }catch(error){if(stillOpen())notify(message(error));}
+      finally{
+        if(stillOpen()){historyLoading=false;renderAddress();renderResponse();}
+      }
       break;
     }
     case "copy-history":if(entry)copyText(entry.request.url).then(()=>notify("已复制请求地址")).catch(error=>notify(message(error)));break;
@@ -720,7 +738,7 @@ by("copy-result").addEventListener("click",async()=>{
 
 async function sendOrCancel() {
   if(sending){await rpc("Cancel");return;}
-  if(!hasAddress()||state.locked||by("dialog").open)return;
+  if(!hasAddress()||state.locked||historyLoading||by("dialog").open)return;
   closeMenu();
   stopPreview();
   sending=true;cancelled=false;failure="";result=null;elapsed=0;copied="";
