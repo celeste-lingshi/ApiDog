@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/celeste-lingshi/ApiDog/internal/apidog"
@@ -46,7 +47,8 @@ func main() {
 			app.ctx = ctx
 			restoreDockIcon()
 		},
-		Bind: []any{app},
+		OnBeforeClose: app.beforeClose,
+		Bind:          []any{app},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -54,15 +56,32 @@ func main() {
 }
 
 type App struct {
-	ctx       context.Context
-	mu        sync.Mutex
-	storage   apidog.Storage
-	workspace apidog.Workspace
-	loadErr   error
-	saveErr   error
-	cancel    context.CancelFunc
-	preview   *previewJob
-	migrating bool
+	ctx        context.Context
+	mu         sync.Mutex
+	storage    apidog.Storage
+	workspace  apidog.Workspace
+	loadErr    error
+	saveErr    error
+	cancel     context.CancelFunc
+	preview    *previewJob
+	migrating  bool
+	revision   uint64
+	closeGuard atomic.Bool
+}
+
+func (a *App) beforeClose(ctx context.Context) bool {
+	if !a.closeGuard.Load() {
+		return false
+	}
+	runtime.EventsEmit(ctx, "apidog:before-close")
+	return true
+}
+
+func (a *App) EnableCloseGuard() { a.closeGuard.Store(true) }
+
+func (a *App) QuitAfterSave() {
+	a.closeGuard.Store(false)
+	runtime.Quit(a.ctx)
 }
 
 type previewJob struct{ cancel context.CancelFunc }
@@ -72,6 +91,7 @@ type State struct {
 	History   []apidog.HistoryEntry `json:"history"`
 	Locked    bool                  `json:"locked"`
 	Issue     string                `json:"issue"`
+	Revision  uint64                `json:"revision"`
 }
 
 func (a *App) state() State {
@@ -80,7 +100,10 @@ func (a *App) state() State {
 	for index := range history {
 		history[index].Response = nil
 	}
-	state := State{Directory: apidog.Directory{Categories: slices.Clone(dir.Categories), Requests: slices.Clone(dir.Requests)}, History: history, Locked: len(a.workspace.EncryptedCredentials) > 0}
+	state := State{
+		Directory: apidog.Directory{Categories: slices.Clone(dir.Categories), Requests: slices.Clone(dir.Requests)},
+		History:   history, Locked: len(a.workspace.EncryptedCredentials) > 0, Revision: a.revision,
+	}
 	if a.loadErr != nil {
 		state.Issue = "工作区读取失败。草稿可继续编辑，工作区无法写入。\n" + a.loadErr.Error()
 	} else if a.saveErr != nil {
@@ -124,6 +147,7 @@ func (a *App) save(workspace apidog.Workspace) (State, error) {
 	}
 	a.workspace = workspace
 	a.saveErr = nil
+	a.revision++
 	return a.state(), nil
 }
 
@@ -171,6 +195,23 @@ func (a *App) SaveRequest(request apidog.SavedRequest) (State, error) {
 	}
 	dir.Requests = append(dir.Requests, request)
 	return a.save(workspace)
+}
+
+func (a *App) SaveDraft(id string, draft apidog.Draft) (State, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.writable(); err != nil {
+		return a.state(), err
+	}
+	workspace := a.editDirectory()
+	for i := range workspace.Directory.Requests {
+		request := &workspace.Directory.Requests[i]
+		if request.ID == id {
+			request.Draft = draft
+			return a.save(workspace)
+		}
+	}
+	return a.state(), errors.New("请求已不存在。")
 }
 
 func validCategory(dir *apidog.Directory, id *string) bool {
@@ -262,6 +303,7 @@ func (a *App) Migrate() (State, error) {
 	a.workspace = w
 	a.loadErr = nil
 	a.saveErr = nil
+	a.revision++
 	return a.state(), nil
 }
 

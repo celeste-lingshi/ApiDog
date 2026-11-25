@@ -70,6 +70,45 @@ func TestSaveFailure(t *testing.T) {
 	}
 }
 
+func TestSaveDraft(t *testing.T) {
+	storage := apidog.Storage{Folder: t.TempDir()}
+	a := &App{ctx: t.Context(), storage: storage}
+	initial, err := a.NewCategory("已移动的分类")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := apidog.NewID()
+	request := apidog.SavedRequest{ID: id, Name: "原名称", Draft: apidog.NewDraft()}
+	if _, err := a.SaveRequest(request); err != nil {
+		t.Fatal(err)
+	}
+	request.Name = "改过的名称"
+	request.CategoryID = &initial.Directory.Categories[0].ID
+	moved, err := a.SaveRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	draft := apidog.NewDraft()
+	draft.URL = "https://example.test/updated"
+	saved, err := a.SaveDraft(id, draft)
+	if err != nil || saved.Revision <= moved.Revision {
+		t.Fatal("自动保存没有更新工作区", err)
+	}
+	persisted, err := storage.Load()
+	if err != nil || !reflect.DeepEqual(persisted.Directory.Requests[0],
+		apidog.SavedRequest{ID: id, Name: request.Name, CategoryID: request.CategoryID, Draft: draft}) {
+		t.Fatal("自动保存没有写入草稿，或改动了名称和目录", err)
+	}
+
+	if _, err := a.DeleteRequest(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SaveDraft(id, draft); err == nil || len(a.State().Directory.Requests) != 0 {
+		t.Fatal("待保存的草稿重新创建了已删除的请求")
+	}
+}
+
 func TestHistoryResponses(t *testing.T) {
 	storage := apidog.Storage{Folder: t.TempDir()}
 	var old apidog.Workspace

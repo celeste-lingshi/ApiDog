@@ -63,9 +63,12 @@ let historyLoading = false;
 let theme = "dark", result = null, elapsed = 0, failure = "", cancelled = false, sending = false, migrating = false;
 let preview = null, previewError = "", previewSequence = 0, previewTimer, previewTask, noticeTimer, copied = "";
 let dragged = null, menuAnchor = null, menuItems = [], dialogSubmit = null;
+let draftRevision = 0, savedRevision = 0, saveTimer, saveJob, saveIssue = "", showSaved = false, closing = false;
+const autosaveDelay = 600;
 const systemTheme = matchMedia("(prefers-color-scheme: dark)");
 
 function adopt(value) {
+  if (value.revision<state.revision) return;
   state = value;
   state.directory ??= {};
   state.directory.categories ??= [];
@@ -73,6 +76,7 @@ function adopt(value) {
   state.history ??= [];
 }
 const activeSaved = () => state.directory.requests.find(r=>r.id===savedID);
+const draftNeedsSave = () => !state.locked && !!activeSaved() && draftRevision!==savedRevision;
 const methodAllowsBody = () => !["GET","HEAD"].includes(draft.method);
 const hasAddress = () => draft.url.trim() !== "";
 const generated = () => ["hmac","script"].includes(draft.auth.mode);
@@ -97,7 +101,9 @@ function notify(text) {
 }
 
 function selectDraft(next, existing=null, history=null) {
+  clearTimeout(saveTimer);
   draft=normalize(next); savedID=existing; historyID=history; result=null; elapsed=0; failure=""; cancelled=false;
+  savedRevision=draftRevision; saveIssue=""; showSaved=false;
   historyLoading=history!==null;
   responseTab=historyLoading?"body":"curl"; copied="";
   requestTab=variableNames().length ? "variables" : draft.auth.mode!=="none" ? "authentication"
@@ -166,13 +172,14 @@ function renderSidebar() {
 
 function renderAddress() {
   const saved=activeSaved();
-  const disabled=state.locked||sending;
+  const disabled=state.locked||sending||closing;
   const category=state.directory.categories.find(c=>c.id===saved?.categoryID);
   const trail=by("breadcrumb");
   trail.hidden=!saved;
+  const saveState=saveJob?"保存中…":saveIssue?"保存失败":draftNeedsSave()?"有修改":showSaved?"已保存":"";
   trail.innerHTML=!saved?"":(category?`<span class="category">${icon("folder")} ${escape(category.name)}</span>${icon("right")}`:"")
       + `<strong class="ellipsis">${escape(saved.name)}</strong>`
-      + (JSON.stringify(normalize(saved.draft))!==JSON.stringify(draft)?'<span class="modified">有修改</span>':"");
+      + (saveState?`<span class="modified ${saveState==="已保存"?"saved-state":""}" title="${escape(saveIssue)}" role="status">${saveState}</span>`:"");
   const button=by("method");
   button.innerHTML=escape(draft.method)+icon("down");
   button.style.setProperty("--method",palette(draft.method));
@@ -185,7 +192,7 @@ function renderAddress() {
   by("save-as").disabled=disabled;
   by("import").disabled=disabled;
   by("send").innerHTML=(sending?icon("stop")+"取消":icon("send")+"发送 <span class=\"shortcut\">⌘↩</span>");
-  by("send").disabled=state.locked||historyLoading||(!sending&&!hasAddress());
+  by("send").disabled=state.locked||historyLoading||closing||(!sending&&!hasAddress());
 }
 
 function input(id, val, label, placeholder="",password=false) {
@@ -265,7 +272,7 @@ function renderEditor() {
       +"<p>指定解析和代理决定请求怎么连接。响应提取只影响返回结果的显示。</p>"; break;
   }
   editor.innerHTML=view;
-  if (sending||state.locked) editor.querySelectorAll("input,button,textarea").forEach(e=>e.disabled=true);
+  if (sending||state.locked||closing) editor.querySelectorAll("input,button,textarea").forEach(e=>e.disabled=true);
 }
 
 function renderResponse() {
@@ -361,7 +368,70 @@ function schedulePreview() {
     if (responseTab==="curl") renderResponse();
   },generated()?180:90);
 }
-function changed() {renderAddress();schedulePreview();}
+function changed() {
+  draftRevision++;
+  saveIssue="";
+  clearTimeout(saveTimer);
+  if (draftNeedsSave()) {
+    saveTimer=setTimeout(()=>saveActiveDraft().catch(error=>notify(message(error))),autosaveDelay);
+  }
+  renderAddress();
+  schedulePreview();
+}
+
+async function saveActiveDraft() {
+  while (saveJob) await saveJob;
+  if (!draftNeedsSave()) return;
+  const id=savedID, revision=draftRevision;
+  const job=rpc("SaveDraft",id,clone(draft)).then(data=>{
+    adopt(data);
+    if (id===savedID) {
+      savedRevision=revision;
+      saveIssue="";
+      showSaved=true;
+    }
+  },error=>{
+    if (id===savedID) saveIssue=message(error);
+    throw error;
+  });
+  saveJob=job;
+  renderAddress();
+  try { await job; }
+  finally {
+    saveJob=null;
+    renderAddress();
+    renderBanner();
+    if (sidebar==="directory"&&!dragged) renderSidebar();
+  }
+}
+
+async function flushActiveDraft() {
+  clearTimeout(saveTimer);
+  while (saveJob||draftNeedsSave()) {
+    await saveActiveDraft();
+    clearTimeout(saveTimer);
+  }
+}
+
+async function canSwitchDraft() {
+  if(closing)return false;
+  try{await flushActiveDraft();return !closing;}
+  catch(error){notify(message(error));return false;}
+}
+
+async function requestClose() {
+  if(closing)return;
+  closing=true;
+  renderAddress();renderEditor();
+  try {
+    await flushActiveDraft();
+    await rpc("QuitAfterSave");
+  } catch(error) {
+    closing=false;
+    renderAddress();renderEditor();
+    notify(message(error));
+  }
+}
 
 
 function closeMenu({restore=false}={}) {
@@ -428,7 +498,7 @@ by("method").addEventListener("click",()=>{
 });
 by("minimize").addEventListener("click",()=>window.runtime?.WindowMinimise());
 by("fullscreen").addEventListener("click",()=>rpc("ToggleFullscreen").catch(error=>notify(message(error))));
-by("close-window").addEventListener("click",()=>window.runtime?.Quit());
+by("close-window").addEventListener("click",requestClose);
 
 function dialog(title,body,confirm,submit,{wide=false,destructive=false}={}) {
   closeMenu();
@@ -481,19 +551,22 @@ function editRequest(kind, source=null) {
   const categoryRows=categories.map((c,i)=>`<button type="button" class="folder" role="radio" data-category-choice="${i}" aria-checked="${c.id===categoryID}">${icon("folder")} ${escape(c.name)}</button>`).join("");
   const base=clone(payload);
   const before=activeSaved();
-  const openCopy=kind!=="duplicate"||source.id===savedID||JSON.stringify(draft)===JSON.stringify(normalize(before?.draft??newDraft()));
+  const openCopy=kind!=="duplicate"||source.id===savedID||(before?!draftNeedsSave():JSON.stringify(draft)===JSON.stringify(newDraft()));
   dialog(title,input("request-name",name,"请求名称","请求名称")+
     `<p style="margin:10px 0 0">分类</p><div class="category-options" role="radiogroup" aria-label="分类">${categoryRows}</div>`,
     "保存", async()=>{
       const title=by("request-name").value.trim();
       if (!title) throw Error("请输入请求名称。");
+      if (openCopy) await flushActiveDraft();
       const id=kind==="edit"?source.id:nextID();
-      adopt(await rpc("SaveRequest",{id,name:title,categoryID,draft:base}));
+      const current=kind==="edit"?state.directory.requests.find(r=>r.id===id):null;
+      if (kind==="edit"&&!current) throw Error("请求已不存在。");
+      adopt(await rpc("SaveRequest",{id,name:title,categoryID,draft:current?.draft??base}));
       if (categoryID) collapsed.delete(categoryID);
       sidebar="directory";
       if (["new","duplicate"].includes(kind)&&openCopy) selectDraft(base,id);
       else {
-        if (kind!=="duplicate") savedID=id;
+        if (kind==="save"){savedID=id;savedRevision=draftRevision;showSaved=true;}
         render();
       }
     }
@@ -512,7 +585,9 @@ function importCurl() {
   dialog("导入 cURL",'<p>粘贴 cURL 命令，也支持带签名和响应提取的命令片段。</p><textarea id="curl-source" class="text-editor" aria-label="cURL 命令" spellcheck="false" placeholder="curl https://example.com"></textarea>',
     "导入",async()=>{
       if (!by("curl-source").value.trim()) throw Error("请粘贴以 curl 开头的命令。");
-      selectDraft(await rpc("ImportCurl",by("curl-source").value));
+      const imported=await rpc("ImportCurl",by("curl-source").value);
+      await flushActiveDraft();
+      selectDraft(imported);
     },{wide:true});
 }
 by("import").addEventListener("click",importCurl);
@@ -553,17 +628,23 @@ by("sidebar-list").addEventListener("click",async event=>{
   const saved=state.directory.requests.find(r=>r.id===row.dataset.request);
   const entry=state.history.find(h=>h.id===row.dataset.history);
   switch(trigger.dataset.action) {
-    case "open": if(saved&&!sending)selectDraft(saved.draft,saved.id);break;
+    case "open": {
+      if(saved&&!sending&&await canSwitchDraft()){
+        const latest=state.directory.requests.find(r=>r.id===saved.id);
+        if(latest)selectDraft(latest.draft,latest.id);
+      }
+      break;
+    }
     case "duplicate":if(saved)editRequest("duplicate",saved);break;
     case "delete":
       if(saved)confirm("删除「"+saved.name+"」？","这条请求将从目录移除，发送历史会保留。","删除请求",async()=>{
         adopt(await rpc("DeleteRequest",saved.id));
-        if(savedID===saved.id)savedID=null;
+        if(savedID===saved.id){clearTimeout(saveTimer);savedID=null;saveIssue="";showSaved=false;}
         render();
       });
       break;
     case "history": {
-      if(!entry||sending)break;
+      if(!entry||sending||!await canSwitchDraft())break;
       selectDraft(entry.request,null,entry.id);
       const opened=draft;
       const snapshot=JSON.stringify(draft);
@@ -624,15 +705,12 @@ by("sidebar-list").addEventListener("drop",async event=>{
 });
 by("sidebar-list").addEventListener("dragend",clearDrag);
 
-let saving=false;
 async function saveCurrent() {
-  if(state.locked||sending||saving||by("dialog").open)return;
+  if(state.locked||sending||closing||by("dialog").open)return;
   const saved=activeSaved();
   if(!saved){if(hasAddress())editRequest("save");return;}
-  saving=true;
-  try{adopt(await rpc("SaveRequest",{...saved,draft:clone(draft)}));sidebar="directory";render();}
+  try{await flushActiveDraft();sidebar="directory";renderSidebar();}
   catch(error){notify(message(error));}
-  finally{saving=false;}
 }
 by("save").addEventListener("click",saveCurrent);
 by("save-as").addEventListener("click",()=>editRequest("save",activeSaved()));
@@ -737,6 +815,7 @@ by("copy-result").addEventListener("click",async()=>{
 });
 
 async function sendOrCancel() {
+  if(closing)return;
   if(sending){await rpc("Cancel");return;}
   if(!hasAddress()||state.locked||historyLoading||by("dialog").open)return;
   closeMenu();
@@ -785,6 +864,10 @@ by("fullscreen").innerHTML=icon("expand");
 by("close-window").innerHTML=icon("close");
 by("request-heading").innerHTML=icon("edit")+"请求参数";
 by("search-icon").innerHTML=icon("search");
+if(window.runtime?.EventsOn){
+  window.runtime.EventsOn("apidog:before-close",requestClose);
+  rpc("EnableCloseGuard").catch(error=>notify(message(error)));
+}
 applyTheme();
 render();
 Promise.all([rpc("State"),rpc("Theme")]).then(([data,mode])=>{
