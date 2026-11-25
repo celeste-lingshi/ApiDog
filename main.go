@@ -42,8 +42,11 @@ func main() {
 		Title: "ApiDog", Width: 1200, Height: 740, MinWidth: 820, MinHeight: 610, Frameless: true,
 		BackgroundColour: &options.RGBA{R: 17, G: 21, B: 29, A: 255},
 		AssetServer:      &assetserver.Options{Assets: assets},
-		OnStartup:        func(ctx context.Context) { app.ctx = ctx },
-		Bind:             []any{app},
+		OnStartup: func(ctx context.Context) {
+			app.ctx = ctx
+			restoreDockIcon()
+		},
+		Bind: []any{app},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
